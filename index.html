@@ -4,27 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>大学四年生活纪念场 Demo</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Audiowide&family=Black+Ops+One&family=Noto+Serif+SC:wght@600;900&family=Orbitron:wght@700;900&display=swap"
+      rel="stylesheet"
+    />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <div class="app-shell">
       <section class="home-view view is-active" id="homeView" aria-label="首页记忆球">
-        <div class="home-copy">
-          <p class="home-kicker">由照片组成的大学记忆星球</p>
-          <h1>四年记忆<br />正在旋转</h1>
-          <p class="home-subtitle">
-            拖动星球，点亮一张照片。点击任意照片，会把这段记忆请到屏幕中央。
-          </p>
+        <div class="home-heading" id="homeTitle">
+          <h1>JJN's UG life @ CUHKSZ</h1>
+          <p>2022-2026</p>
         </div>
 
-        <div class="sphere-stage" id="sphereStage" aria-label="可拖拽旋转的照片球">
-          <div class="sphere-orbit sphere-orbit-one"></div>
-          <div class="sphere-orbit sphere-orbit-two"></div>
-          <div class="sphere-layer" id="sphereLayer"></div>
-        </div>
+        <div class="sphere-stage" id="sphereStage" aria-label="可点击的照片球"></div>
 
         <button class="enter-button" id="enterButton" type="button">
-          <span>进入四年</span>
+          <span>enter</span>
         </button>
       </section>
 
@@ -36,12 +35,18 @@
       <article class="detail-card" role="dialog" aria-modal="true" aria-label="照片详情"></article>
     </div>
 
+    <div class="image-viewer" id="imageViewer" aria-hidden="true">
+      <div class="image-viewer-backdrop" data-close-viewer></div>
+      <button class="image-viewer-close" type="button" data-close-viewer aria-label="关闭大图">×</button>
+      <img id="viewerImage" alt="" draggable="false" />
+    </div>
+
     <div class="add-modal" id="addModal" aria-hidden="true">
       <div class="add-backdrop" data-close-add></div>
       <form class="add-panel" id="addForm">
         <div class="form-heading">
-          <p class="panel-kicker">新增照片模块</p>
-          <h2>把一段新记忆放进来</h2>
+          <p class="panel-kicker" id="photoFormKicker">新增照片模块</p>
+          <h2 id="photoFormTitle">把一段新记忆放进来</h2>
         </div>
 
         <label class="field field-file">
@@ -86,18 +91,38 @@
           <textarea id="photoFeeling" name="photoFeeling" rows="4" placeholder="写一点当时的心情"></textarea>
         </label>
 
-        <label class="field">
+        <section class="field tag-editor" aria-label="Tags">
           <span>Tags</span>
-          <input id="photoTags" name="photoTags" type="text" placeholder="朋友, 课堂, 晚霞" />
-        </label>
+          <div class="selected-tag-list" id="selectedTagList"></div>
+          <div class="tag-pick-list" id="tagPickList"></div>
+          <div class="tag-create-row">
+            <input id="newTagInput" type="text" placeholder="搜索或新增 tag" />
+            <button class="small-button" type="button" id="addTagButton">添加</button>
+          </div>
+          <div class="tag-manage-list" id="tagManageList"></div>
+        </section>
 
         <div class="form-actions">
           <button class="plain-button" type="button" data-close-add>取消</button>
-          <button class="solid-button" type="submit">保存记忆</button>
+          <button class="solid-button" type="submit" id="photoSubmitButton">保存记忆</button>
         </div>
       </form>
     </div>
 
+    <div class="confirm-modal" id="deleteModal" aria-hidden="true">
+      <div class="confirm-backdrop" data-close-delete></div>
+      <section class="confirm-panel" role="dialog" aria-modal="true" aria-label="确认删除照片">
+        <p class="panel-kicker">移到回收箱</p>
+        <h2>确定删除这张照片吗？</h2>
+        <p class="confirm-copy" id="deleteMessage">这张照片会先放进回收箱，可以稍后恢复。</p>
+        <div class="form-actions">
+          <button class="plain-button" type="button" data-close-delete>取消</button>
+          <button class="solid-button danger-button" type="button" id="confirmDeleteButton">移到回收箱</button>
+        </div>
+      </section>
+    </div>
+
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

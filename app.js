@@ -56,33 +56,59 @@ const sampleTitles = [
 const homeView = document.querySelector("#homeView");
 const pageView = document.querySelector("#pageView");
 const sphereStage = document.querySelector("#sphereStage");
-const sphereLayer = document.querySelector("#sphereLayer");
 const enterButton = document.querySelector("#enterButton");
 const detailModal = document.querySelector("#detailModal");
 const detailCard = detailModal.querySelector(".detail-card");
 const addModal = document.querySelector("#addModal");
 const addForm = document.querySelector("#addForm");
 const photoMonthSelect = document.querySelector("#photoMonth");
+const photoFormKicker = document.querySelector("#photoFormKicker");
+const photoFormTitle = document.querySelector("#photoFormTitle");
+const photoSubmitButton = document.querySelector("#photoSubmitButton");
+const selectedTagList = document.querySelector("#selectedTagList");
+const tagPickList = document.querySelector("#tagPickList");
+const tagManageList = document.querySelector("#tagManageList");
+const newTagInput = document.querySelector("#newTagInput");
+const addTagButton = document.querySelector("#addTagButton");
+const deleteModal = document.querySelector("#deleteModal");
+const deleteMessage = document.querySelector("#deleteMessage");
+const confirmDeleteButton = document.querySelector("#confirmDeleteButton");
+const imageViewer = document.querySelector("#imageViewer");
+const viewerImage = document.querySelector("#viewerImage");
 
 let memories = loadMemories();
 let currentScreen = { type: "home" };
 let activeFilter = "全部";
 let lastDetailSource = null;
 let detailOpen = false;
+let pendingDeleteId = null;
+let editingMemoryId = null;
+let pendingTagDelete = null;
+let selectedFormTags = new Set();
+let viewerScale = 1;
 
 const sphere = {
+  scene: null,
+  camera: null,
+  renderer: null,
+  group: null,
+  raycaster: null,
+  pointer: null,
+  clock: null,
   items: [],
-  rotationX: -0.16,
-  rotationY: 0.45,
+  hovered: null,
+  exploding: false,
+  explodeStart: 0,
+  rotationSpeed: (Math.PI * 2) / 24,
   velocityX: 0,
   velocityY: 0,
   dragging: false,
-  hoverPaused: false,
   exploded: false,
   moved: false,
   lastX: 0,
   lastY: 0,
   frameId: 0,
+  resizeObserver: null,
 };
 
 function makeSampleImage(title, index) {
@@ -178,14 +204,32 @@ function formatMonth(month) {
   return `${month}月`;
 }
 
+function getActiveMemories() {
+  return memories.filter((memory) => !memory.deletedAt);
+}
+
+function getTrashedMemories() {
+  return memories.filter((memory) => memory.deletedAt);
+}
+
 function getMonthMemories(year, month) {
-  return memories.filter((memory) => memory.year === year && Number(memory.month) === Number(month));
+  return getActiveMemories().filter((memory) => memory.year === year && Number(memory.month) === Number(month));
 }
 
 function getTagsFor(list) {
   const tags = new Set();
   list.forEach((memory) => memory.tags.forEach((tag) => tags.add(tag)));
   return ["全部", ...Array.from(tags)];
+}
+
+function getAllTags() {
+  const tags = new Set();
+  memories.forEach((memory) => {
+    (memory.tags || []).forEach((tag) => {
+      if (tag) tags.add(tag);
+    });
+  });
+  return Array.from(tags).sort((a, b) => a.localeCompare(b, "zh-CN"));
 }
 
 function renderTagPills(tags) {
@@ -210,14 +254,43 @@ function renderSphereCard(memory, index) {
 function renderMemoryCard(memory, index) {
   const tilt = ((index % 7) - 3) * 0.45;
   return `
-    <button class="memory-card" type="button" data-memory-id="${memory.id}" style="--tilt:${tilt}deg" aria-label="查看${escapeHtml(memory.title)}">
+    <article class="memory-card" data-memory-id="${memory.id}" style="--tilt:${tilt}deg" tabindex="0" role="button" aria-label="查看${escapeHtml(memory.title)}">
+      <button class="delete-memory-button" type="button" data-action="delete" data-memory-id="${memory.id}" aria-label="删除${escapeHtml(memory.title)}" title="移到回收箱">×</button>
       <img src="${memory.image}" alt="${escapeHtml(memory.title)}" draggable="false" />
       <span class="card-body">
         <h3>${escapeHtml(memory.title)}</h3>
         <p class="card-meta">${escapeHtml(memory.date || "未填写日期")} · ${escapeHtml(memory.place || "未填写地点")}</p>
-        <p class="card-feeling">${escapeHtml(memory.feeling || "还没有写下感想。")}</p>
+        <details class="card-feeling-panel">
+          <summary>我的感想</summary>
+          <p>${escapeHtml(memory.feeling || "还没有写下感想。")}</p>
+        </details>
         ${renderTagPills(memory.tags)}
       </span>
+    </article>
+  `;
+}
+
+function renderTrashCard(memory, index) {
+  const tilt = ((index % 5) - 2) * 0.45;
+  return `
+    <article class="memory-card trash-card" data-memory-id="${memory.id}" style="--tilt:${tilt}deg">
+      <img src="${memory.image}" alt="${escapeHtml(memory.title)}" draggable="false" />
+      <span class="card-body">
+        <h3>${escapeHtml(memory.title)}</h3>
+        <p class="card-meta">已放入回收箱 · ${escapeHtml(memory.deletedAt || "")}</p>
+        <div class="trash-actions">
+          <button class="small-button" type="button" data-action="restore" data-memory-id="${memory.id}">恢复</button>
+          <button class="small-button danger-button" type="button" data-action="purge" data-memory-id="${memory.id}">彻底删除</button>
+        </div>
+      </span>
+    </article>
+  `;
+}
+
+function renderPurePhoto(memory, index) {
+  return `
+    <button class="pure-photo-tile" type="button" data-memory-id="${memory.id}" aria-label="查看${escapeHtml(memory.title)}" style="--delay:${index % 12}">
+      <img src="${memory.image}" alt="${escapeHtml(memory.title)}" draggable="false" />
     </button>
   `;
 }
@@ -225,34 +298,89 @@ function renderMemoryCard(memory, index) {
 function initSphere() {
   cancelAnimationFrame(sphere.frameId);
   sphere.exploded = false;
-  sphereLayer.innerHTML = "";
-  const points = fibonacciPoints(memories.length);
-  sphere.items = memories.map((memory, index) => {
-    const slot = document.createElement("div");
-    slot.className = "sphere-slot";
-    slot.dataset.memoryId = memory.id;
-    slot.innerHTML = renderSphereCard(memory, index);
-    sphereLayer.appendChild(slot);
+  sphere.exploding = false;
+  sphere.hovered = null;
 
-    slot.addEventListener("pointerenter", () => {
-      sphere.hoverPaused = true;
-      slot.classList.add("is-hovered");
-    });
+  if (!window.THREE) {
+    initFallbackSphere();
+    return;
+  }
 
-    slot.addEventListener("pointerleave", () => {
-      sphere.hoverPaused = false;
-      slot.classList.remove("is-hovered");
-    });
-
-    slot.querySelector("button").addEventListener("click", (event) => {
-      event.stopPropagation();
-      if (sphere.moved) return;
-      openDetail(memory, slot.querySelector(".memory-tile"));
-    });
-
-    return { memory, slot, point: points[index] };
-  });
+  if (!sphere.renderer) setupThreeSphere();
+  rebuildSphereMeshes();
+  resizeSphere();
   renderSphere();
+}
+
+function setupThreeSphere() {
+  sphere.scene = new THREE.Scene();
+  sphere.camera = new THREE.PerspectiveCamera(34, 1, 0.1, 100);
+  sphere.camera.position.set(0, 0, 8.8);
+  sphere.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  sphere.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  sphere.renderer.setClearColor(0x000000, 0);
+  sphereStage.appendChild(sphere.renderer.domElement);
+
+  sphere.group = new THREE.Group();
+  sphere.group.rotation.set(-0.08, 0.16, 0.02);
+  sphere.group.position.y = -0.32;
+  sphere.scene.add(sphere.group);
+  sphere.raycaster = new THREE.Raycaster();
+  sphere.pointer = new THREE.Vector2(-10, -10);
+  sphere.clock = new THREE.Clock();
+  sphere.resizeObserver = new ResizeObserver(resizeSphere);
+  sphere.resizeObserver.observe(sphereStage);
+
+  const ambient = new THREE.AmbientLight(0xffffff, 0.82);
+  sphere.scene.add(ambient);
+}
+
+function rebuildSphereMeshes() {
+  while (sphere.group.children.length) {
+    const child = sphere.group.children.pop();
+    child.geometry?.dispose();
+    child.material?.map?.dispose();
+    child.material?.dispose();
+  }
+
+  const sphereMemories = getActiveMemories();
+  const targetCount = sphereMemories.length;
+  const points = fibonacciPoints(targetCount);
+  sphere.items = points.map((point, index) => {
+    const memory = sphereMemories[index];
+    const texture = makeCardTexture(memory, index);
+    const size = getSphereTileSize(targetCount);
+    const geometry = new THREE.PlaneGeometry(size.width, size.height);
+    const material = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      opacity: 1,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    const position = new THREE.Vector3(point.x, point.y, point.z).multiplyScalar(2.18);
+    mesh.position.copy(position);
+    mesh.lookAt(0, 0, 0);
+    mesh.userData = {
+      memory,
+      basePosition: position.clone(),
+      index,
+      explodeVector: new THREE.Vector3(),
+      explodeSpin: new THREE.Vector3(),
+    };
+    sphere.group.add(mesh);
+    return mesh;
+  });
+}
+
+function getSphereTileSize(count) {
+  if (count <= 1) return { width: 1.18, height: 1.48 };
+  if (count <= 6) return { width: 0.82, height: 1.04 };
+  if (count <= 14) return { width: 0.58, height: 0.72 };
+  if (count <= 32) return { width: 0.43, height: 0.54 };
+  if (count <= 80) return { width: 0.34, height: 0.42 };
+  return { width: 0.28, height: 0.35 };
 }
 
 function fibonacciPoints(count) {
@@ -272,71 +400,153 @@ function fibonacciPoints(count) {
   return points;
 }
 
-function rotatePoint(point, rotationX, rotationY) {
-  const cosX = Math.cos(rotationX);
-  const sinX = Math.sin(rotationX);
-  const cosY = Math.cos(rotationY);
-  const sinY = Math.sin(rotationY);
+function makeCardTexture(memory, index) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 300;
+  canvas.height = 394;
+  const context = canvas.getContext("2d");
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
 
-  const y1 = point.y * cosX - point.z * sinX;
-  const z1 = point.y * sinX + point.z * cosX;
-  const x2 = point.x * cosY + z1 * sinY;
-  const z2 = -point.x * sinY + z1 * cosY;
+  drawCardTexture(context, memory, index);
+  const image = new Image();
+  image.onload = () => {
+    drawCardTexture(context, memory, index, image);
+    texture.needsUpdate = true;
+  };
+  image.src = memory.image;
+  return texture;
+}
 
-  return { x: x2, y: y1, z: z2 };
+function drawCardTexture(context, memory, index, image = null) {
+  const width = context.canvas.width;
+  const height = context.canvas.height;
+  context.clearRect(0, 0, width, height);
+  if (image) {
+    const ratio = Math.max(width / image.width, height / image.height);
+    const drawWidth = image.width * ratio;
+    const drawHeight = image.height * ratio;
+    context.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+  } else {
+    const gradient = context.createLinearGradient(0, 0, width, height);
+    const palette = samplePalette[index % samplePalette.length];
+    gradient.addColorStop(0, palette[0]);
+    gradient.addColorStop(0.58, palette[1]);
+    gradient.addColorStop(1, palette[2]);
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, width, height);
+  }
+}
+
+function roundedRect(context, x, y, width, height, radius) {
+  context.beginPath();
+  context.moveTo(x + radius, y);
+  context.arcTo(x + width, y, x + width, y + height, radius);
+  context.arcTo(x + width, y + height, x, y + height, radius);
+  context.arcTo(x, y + height, x, y, radius);
+  context.arcTo(x, y, x + width, y, radius);
+  context.closePath();
+}
+
+function truncateText(value, maxLength) {
+  const text = String(value || "");
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function resizeSphere() {
+  if (!sphere.renderer || !sphere.camera) return;
+  const rect = sphereStage.getBoundingClientRect();
+  sphere.renderer.setSize(rect.width, rect.height, false);
+  sphere.camera.aspect = rect.width / Math.max(rect.height, 1);
+  sphere.camera.updateProjectionMatrix();
 }
 
 function renderSphere() {
-  if (sphere.exploded) return;
-  const rect = sphereStage.getBoundingClientRect();
-  const radius = Math.min(rect.width, rect.height) * (rect.width < 720 ? 0.3 : 0.34);
+  if (!sphere.renderer || sphere.exploded) return;
+  const delta = Math.min(sphere.clock.getDelta(), 0.04);
 
-  if (!sphere.dragging && !detailOpen) {
-    if (!sphere.hoverPaused) sphere.rotationY += 0.0018;
-    sphere.rotationX += sphere.velocityX;
-    sphere.rotationY += sphere.velocityY;
-    sphere.velocityX *= 0.95;
-    sphere.velocityY *= 0.95;
+  if (!sphere.dragging && !detailOpen && !sphere.exploding) {
+    const speed = sphere.hovered ? sphere.rotationSpeed * 0.22 : sphere.rotationSpeed;
+    sphere.group.rotation.y -= delta * speed;
+    sphere.group.rotation.x += sphere.velocityX;
+    sphere.group.rotation.y += sphere.velocityY;
+    sphere.velocityX *= 0.92;
+    sphere.velocityY *= 0.92;
   }
 
-  sphere.items.forEach(({ slot, point }) => {
-    const rotated = rotatePoint(point, sphere.rotationX, sphere.rotationY);
-    const depth = (rotated.z + 1) / 2;
-    const scale = 0.58 + depth * 0.58;
-    const x = rotated.x * radius;
-    const y = rotated.y * radius;
-
-    slot.dataset.x = String(x);
-    slot.dataset.y = String(y);
-    slot.dataset.scale = String(scale);
-    slot.style.opacity = String(0.38 + depth * 0.62);
-    slot.style.zIndex = String(Math.round(depth * 1200));
-    slot.style.transform = `translate3d(calc(-50% + ${x}px), calc(-50% + ${y}px), 0) scale(${scale})`;
-  });
-
+  updateRaycastHover();
+  updateSphereMeshes();
+  sphere.renderer.render(sphere.scene, sphere.camera);
   sphere.frameId = requestAnimationFrame(renderSphere);
 }
 
+function updateSphereMeshes() {
+  const worldPosition = new THREE.Vector3();
+
+  sphere.items.forEach((mesh) => {
+    mesh.getWorldPosition(worldPosition);
+    mesh.visible = true;
+
+    const depth = Math.max(0, Math.min(1, (worldPosition.z + 2.18) / 4.36));
+    const hoverBoost = mesh === sphere.hovered ? 1.34 : 1;
+    const edgeDim = 0.32 + depth * 0.68;
+    mesh.scale.setScalar((0.76 + depth * 0.34) * hoverBoost);
+    mesh.material.opacity = sphere.exploding ? mesh.material.opacity : 0.24 + depth * 0.72;
+    mesh.material.color.setRGB(edgeDim, edgeDim, edgeDim);
+    mesh.renderOrder = Math.round(depth * 1000) + (mesh === sphere.hovered ? 1000 : 0);
+  });
+}
+
+function updateRaycastHover() {
+  if (sphere.dragging || detailOpen || sphere.exploding) return;
+  sphere.raycaster.setFromCamera(sphere.pointer, sphere.camera);
+  const hits = sphere.raycaster.intersectObjects(sphere.items.filter((mesh) => mesh.visible), false);
+  sphere.hovered = hits[0]?.object || null;
+  sphereStage.style.cursor = sphere.hovered ? "pointer" : "grab";
+}
+
+function projectMeshToScreen(mesh) {
+  const rect = sphereStage.getBoundingClientRect();
+  const vector = new THREE.Vector3();
+  mesh.getWorldPosition(vector);
+  vector.project(sphere.camera);
+  return {
+    x: (vector.x * 0.5 + 0.5) * rect.width + rect.left,
+    y: (-vector.y * 0.5 + 0.5) * rect.height + rect.top,
+  };
+}
+
+function getSphereScreenCenter() {
+  const rect = sphereStage.getBoundingClientRect();
+  return {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height * 0.53,
+  };
+}
+
 function onSpherePointerDown(event) {
-  if (detailOpen || sphere.exploded) return;
+  if (detailOpen || sphere.exploded || sphere.exploding) return;
   sphere.dragging = true;
   sphere.moved = false;
   sphere.lastX = event.clientX;
   sphere.lastY = event.clientY;
   sphere.velocityX = 0;
   sphere.velocityY = 0;
+  updatePointer(event);
   sphereStage.setPointerCapture(event.pointerId);
 }
 
 function onSpherePointerMove(event) {
-  if (!sphere.dragging) return;
+  updatePointer(event);
+  if (!sphere.dragging || !sphere.group) return;
   const dx = event.clientX - sphere.lastX;
   const dy = event.clientY - sphere.lastY;
   if (Math.abs(dx) + Math.abs(dy) > 4) sphere.moved = true;
-  sphere.rotationY += dx * 0.006;
-  sphere.rotationX -= dy * 0.005;
-  sphere.velocityY = dx * 0.0009;
-  sphere.velocityX = -dy * 0.00075;
+  sphere.group.rotation.y += dx * 0.006;
+  sphere.group.rotation.x += dy * 0.0048;
+  sphere.velocityY = dx * 0.0008;
+  sphere.velocityX = dy * 0.0006;
   sphere.lastX = event.clientX;
   sphere.lastY = event.clientY;
 }
@@ -349,38 +559,124 @@ function onSpherePointerUp(event) {
   } catch (error) {
     console.warn("释放拖拽失败", error);
   }
+  if (!sphere.moved && sphere.hovered) {
+    openDetail(sphere.hovered.userData.memory, makeSphereDetailMarker(sphere.hovered));
+  }
   window.setTimeout(() => {
     sphere.moved = false;
   }, 80);
 }
 
+function onSpherePointerLeave() {
+  if (!sphere.pointer) return;
+  sphere.pointer.set(-10, -10);
+  sphere.hovered = null;
+}
+
+function updatePointer(event) {
+  if (!sphere.pointer) return;
+  const rect = sphereStage.getBoundingClientRect();
+  sphere.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+  sphere.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+}
+
+function makeSphereDetailMarker(mesh) {
+  const screen = projectMeshToScreen(mesh);
+  const marker = document.createElement("span");
+  marker.className = "detail-source-marker";
+  marker.style.left = `${screen.x - 42}px`;
+  marker.style.top = `${screen.y - 54}px`;
+  marker.style.width = "84px";
+  marker.style.height = "108px";
+  document.body.appendChild(marker);
+  return marker;
+}
+
 function explodeToMain() {
-  if (sphere.exploded) return;
+  if (sphere.exploded || sphere.exploding) return;
   sphere.exploded = true;
+
+  if (!sphere.renderer) {
+    homeView.classList.add("home-exiting");
+    window.setTimeout(showMainAfterExplosion, 1280);
+    return;
+  }
+
+  sphere.exploding = true;
+  sphere.explodeStart = performance.now();
+  prepareExplosionVectors();
   homeView.classList.add("home-exiting");
-  cancelAnimationFrame(sphere.frameId);
+  animateExplosion();
+}
 
-  sphere.items.forEach(({ slot }, index) => {
-    const x = Number(slot.dataset.x || 0);
-    const y = Number(slot.dataset.y || 0);
-    const scale = Number(slot.dataset.scale || 0.8);
-    const angle = (Math.PI * 2 * index) / Math.max(sphere.items.length, 1) + Math.random() * 0.8;
-    const distance = Math.max(window.innerWidth, window.innerHeight) * (0.72 + Math.random() * 0.45);
-    const tx = Math.cos(angle) * distance;
-    const ty = Math.sin(angle) * distance;
-    slot.style.transition = "transform 820ms cubic-bezier(.12,.8,.18,1), opacity 620ms ease";
-    slot.style.transform = `translate3d(calc(-50% + ${x}px), calc(-50% + ${y}px), 0) scale(${scale})`;
-    requestAnimationFrame(() => {
-      slot.style.opacity = "0";
-      slot.style.transform = `translate3d(calc(-50% + ${x + tx}px), calc(-50% + ${y + ty}px), 0) rotate(${index * 17}deg) scale(0.14)`;
-    });
+function prepareExplosionVectors() {
+  sphere.group.updateMatrixWorld(true);
+  sphere.items.forEach((mesh, index) => {
+    const radial = mesh.userData.basePosition.clone().normalize();
+    if (!Number.isFinite(radial.x)) radial.set(0, 0, 1);
+    const jitter = seededUnit(index);
+    mesh.userData.explodeVector.copy(radial);
+    mesh.userData.explodeDistance = 3.8 + jitter.z * 0.7;
+    mesh.userData.explodeSpin.set(0.45 + Math.abs(jitter.y) * 1.1, 0.45 + Math.abs(jitter.z) * 1.1, 0.6 + Math.abs(jitter.x) * 1.4);
   });
+}
 
+function seededUnit(index) {
+  const a = Math.sin(index * 12.9898) * 43758.5453;
+  const b = Math.sin(index * 78.233) * 19341.1123;
+  const c = Math.sin(index * 39.425) * 12799.6671;
+  return {
+    x: (a - Math.floor(a)) * 2 - 1,
+    y: (b - Math.floor(b)) * 2 - 1,
+    z: c - Math.floor(c),
+  };
+}
+
+function animateExplosion(now = performance.now()) {
+  const phase = Math.min((now - sphere.explodeStart) / 1250, 1);
+  sphere.items.forEach((mesh) => {
+    const vector = mesh.userData.explodeVector;
+    const spin = mesh.userData.explodeSpin;
+    mesh.position.copy(mesh.userData.basePosition).addScaledVector(vector, phase * mesh.userData.explodeDistance);
+    mesh.rotation.x += spin.x * 0.014;
+    mesh.rotation.y += spin.y * 0.014;
+    mesh.rotation.z += spin.z * 0.014;
+    mesh.material.opacity = 1 - phase;
+    mesh.visible = true;
+  });
+  sphere.renderer.render(sphere.scene, sphere.camera);
+
+  if (phase < 1) {
+    requestAnimationFrame(animateExplosion);
+  } else {
+    showMainAfterExplosion();
+  }
+}
+
+function showMainAfterExplosion() {
+  cancelAnimationFrame(sphere.frameId);
+  homeView.classList.add("home-hidden");
+  showMain();
   window.setTimeout(() => {
-    showMain();
-    homeView.classList.remove("home-exiting");
-    initSphere();
-  }, 850);
+    homeView.classList.remove("home-exiting", "home-hidden");
+  }, 120);
+}
+
+function initFallbackSphere() {
+  sphereStage.innerHTML = "";
+  const fallback = document.createElement("div");
+  fallback.className = "fallback-sphere";
+  const list = memories.slice(0, 48);
+  list.forEach((memory, index) => {
+    const item = document.createElement("button");
+    item.className = "memory-tile";
+    item.type = "button";
+    item.style.setProperty("--tilt", `${(index % 5) - 2}deg`);
+    item.innerHTML = `<img src="${memory.image}" alt="${escapeHtml(memory.title)}" /><span class="tile-title">${escapeHtml(memory.title)}</span>`;
+    item.addEventListener("click", () => openDetail(memory, item));
+    fallback.appendChild(item);
+  });
+  sphereStage.appendChild(fallback);
 }
 
 function setView(view) {
@@ -391,6 +687,7 @@ function setView(view) {
 
 function showHome() {
   currentScreen = { type: "home" };
+  homeView.classList.remove("home-exiting", "home-hidden");
   setView("home");
   sphere.exploded = false;
   initSphere();
@@ -399,16 +696,19 @@ function showHome() {
 function showMain() {
   currentScreen = { type: "main" };
   setView("page");
+  const activeCount = getActiveMemories().length;
+  const trashCount = getTrashedMemories().length;
   pageView.innerHTML = `
     <div class="page-inner">
       <section class="hero-panel">
-        <div class="top-badge">已收录 ${memories.length} 段大学记忆</div>
+        <div class="top-badge">已收录 ${activeCount} 段大学记忆</div>
         <h1>大学四年生活纪念场</h1>
         <p class="hero-copy">
           把合照、晚风、作业、旅行和告别，全部收进这座明亮的记忆发射场。
         </p>
         <div class="sub-actions">
           <button class="plain-button" type="button" data-action="home">返回首页</button>
+          <button class="plain-button" type="button" data-action="trash">回收箱 ${trashCount}</button>
         </div>
       </section>
       <section class="year-grid" aria-label="年级入口">
@@ -420,13 +720,17 @@ function showMain() {
           <strong>随机记忆抽取</strong>
           <span>让今天自己遇见一张过去的照片</span>
         </button>
+        <button class="nav-card nav-pure" type="button" data-action="pure">
+          <strong>照片纯享</strong>
+          <span>把所有照片排成一面干净的墙</span>
+        </button>
       </section>
     </div>
   `;
 }
 
 function renderYearButton(year, subtitle, className) {
-  const count = memories.filter((memory) => memory.year === year).length;
+  const count = getActiveMemories().filter((memory) => memory.year === year).length;
   return `
     <button class="nav-card ${className}" type="button" data-action="year" data-year="${year}">
       <strong>${yearLabels[year]}</strong>
@@ -488,7 +792,6 @@ function showMonth(year, month, filter = "全部") {
         <p class="page-copy">这里陈列这个月份的照片模块。照片多的时候，可以先按 tag 快速筛选。</p>
         <div class="heading-actions">
           <button class="plain-button" type="button" data-action="year" data-year="${year}">返回上一级</button>
-          <button class="solid-button" type="button" data-action="add">新增照片模块</button>
         </div>
       </section>
       <nav class="month-toolbar" aria-label="Tag筛选">
@@ -512,12 +815,63 @@ function showMonth(year, month, filter = "全部") {
   `;
 }
 
+function showTrash() {
+  currentScreen = { type: "trash" };
+  setView("page");
+  const trashed = getTrashedMemories();
+  const cards = trashed.map((memory, index) => renderTrashCard(memory, index)).join("");
+
+  pageView.innerHTML = `
+    <div class="page-inner">
+      <section class="page-heading">
+        <div class="top-badge">回收箱 · ${trashed.length} 张</div>
+        <h1>暂存的记忆</h1>
+        <p class="page-copy">删除后的照片会先放在这里。恢复后，它会回到原来的年级和月份。</p>
+        <div class="heading-actions">
+          <button class="plain-button" type="button" data-action="main">返回上一级</button>
+        </div>
+      </section>
+      ${
+        trashed.length
+          ? `<section class="photo-grid" aria-label="回收箱照片列表">${cards}</section>`
+          : `<section class="empty-state"><h2>回收箱是空的</h2><p>还没有被删除的照片。</p></section>`
+      }
+    </div>
+  `;
+}
+
+function showPurePhotos() {
+  currentScreen = { type: "pure" };
+  setView("page");
+  const active = getActiveMemories();
+  const tiles = active.map((memory, index) => renderPurePhoto(memory, index)).join("");
+
+  pageView.innerHTML = `
+    <div class="page-inner">
+      <section class="page-heading pure-heading">
+        <div class="top-badge">照片纯享 · ${active.length} 张</div>
+        <h1>Photo Wall</h1>
+        <div class="heading-actions">
+          <button class="plain-button" type="button" data-action="main">返回上一级</button>
+        </div>
+      </section>
+      ${
+        active.length
+          ? `<section class="pure-photo-grid" aria-label="照片纯享墙">${tiles}</section>`
+          : `<section class="empty-state"><h2>还没有照片</h2><p>可以先进某个月份，点右下角加号新增。</p></section>`
+      }
+    </div>
+  `;
+}
+
 function openDetail(memory, sourceElement = null) {
   lastDetailSource = sourceElement;
   detailOpen = true;
   detailCard.innerHTML = `
     <div class="detail-media">
-      <img src="${memory.image}" alt="${escapeHtml(memory.title)}" />
+      <button class="detail-image-button" type="button" data-view-image="${memory.id}" aria-label="全屏查看${escapeHtml(memory.title)}">
+        <img src="${memory.image}" alt="${escapeHtml(memory.title)}" />
+      </button>
     </div>
     <div class="detail-content">
       <h2>${escapeHtml(memory.title)}</h2>
@@ -527,6 +881,9 @@ function openDetail(memory, sourceElement = null) {
       </p>
       ${renderTagPills(memory.tags)}
       <p class="detail-feeling">${escapeHtml(memory.feeling || "还没有写下感想。")}</p>
+      <div class="detail-actions">
+        <button class="small-button detail-edit-button" type="button" data-detail-action="edit" data-memory-id="${memory.id}">编辑</button>
+      </div>
       <p class="detail-hint">点击暗色区域回到原来的位置</p>
     </div>
   `;
@@ -538,10 +895,10 @@ function openDetail(memory, sourceElement = null) {
   if (!sourceElement) {
     detailCard.animate(
       [
-        { transform: "translateY(28px) scale(0.94) rotate(-0.5deg)", opacity: 0 },
-        { transform: "translateY(0) scale(1) rotate(-0.5deg)", opacity: 1 },
+        { transform: "translateY(28px) scale(0.94)", opacity: 0 },
+        { transform: "translateY(0) scale(1)", opacity: 1 },
       ],
-      { duration: 320, easing: "cubic-bezier(.18,.8,.24,1)", fill: "both" },
+      { duration: 300, easing: "cubic-bezier(.18,.8,.24,1)", fill: "both" },
     );
     return;
   }
@@ -552,12 +909,12 @@ function openDetail(memory, sourceElement = null) {
     detailCard.animate(
       [
         {
-          transform: `translate(${from.left - to.left}px, ${from.top - to.top}px) scale(${from.width / to.width}, ${from.height / to.height}) rotate(-0.5deg)`,
+          transform: `translate(${from.left - to.left}px, ${from.top - to.top}px) scale(${from.width / to.width}, ${from.height / to.height})`,
           opacity: 0.92,
         },
-        { transform: "translate(0, 0) scale(1) rotate(-0.5deg)", opacity: 1 },
+        { transform: "translate(0, 0) scale(1)", opacity: 1 },
       ],
-      { duration: 430, easing: "cubic-bezier(.12,.86,.2,1)", fill: "both" },
+      { duration: 360, easing: "cubic-bezier(.18,.8,.24,1)", fill: "both" },
     );
   });
 }
@@ -569,16 +926,22 @@ function closeDetail() {
     detailOpen = false;
     detailModal.classList.remove("is-active");
     detailModal.setAttribute("aria-hidden", "true");
-    document.body.style.overflow = "";
+    if (!addModal.classList.contains("is-active") && !deleteModal.classList.contains("is-active") && !imageViewer.classList.contains("is-active")) {
+      document.body.style.overflow = "";
+    }
     detailCard.innerHTML = "";
+    detailCard.style.transformOrigin = "";
+    if (lastDetailSource?.classList?.contains("detail-source-marker")) {
+      lastDetailSource.remove();
+    }
     lastDetailSource = null;
   };
 
   if (!lastDetailSource || !document.body.contains(lastDetailSource)) {
     const animation = detailCard.animate(
       [
-        { transform: "translateY(0) scale(1) rotate(-0.5deg)", opacity: 1 },
-        { transform: "translateY(18px) scale(0.96) rotate(-0.5deg)", opacity: 0 },
+        { transform: "translateY(0) scale(1)", opacity: 1 },
+        { transform: "translateY(18px) scale(0.96)", opacity: 0 },
       ],
       { duration: 220, easing: "ease", fill: "forwards" },
     );
@@ -588,35 +951,247 @@ function closeDetail() {
 
   const from = detailCard.getBoundingClientRect();
   const to = lastDetailSource.getBoundingClientRect();
+  detailCard.style.transformOrigin = "top left";
   const animation = detailCard.animate(
     [
-      { transform: "translate(0, 0) scale(1) rotate(-0.5deg)", opacity: 1 },
+      { transform: "translate(0, 0) scale(1)", opacity: 1 },
       {
-        transform: `translate(${to.left - from.left}px, ${to.top - from.top}px) scale(${to.width / from.width}, ${to.height / from.height}) rotate(-0.5deg)`,
+        transform: `translate(${to.left - from.left}px, ${to.top - from.top}px) scale(${to.width / from.width}, ${to.height / from.height})`,
         opacity: 0.18,
       },
     ],
-    { duration: 320, easing: "cubic-bezier(.2,.7,.2,1)", fill: "forwards" },
+    { duration: 360, easing: "cubic-bezier(.22,.9,.22,1)", fill: "forwards" },
   );
   animation.onfinish = finish;
 }
 
-function openAddModal() {
+function openAddModal(memoryId = null) {
+  editingMemoryId = memoryId;
+  const editing = memoryId ? memories.find((memory) => memory.id === memoryId) : null;
   addModal.classList.add("is-active");
   addModal.setAttribute("aria-hidden", "false");
   document.body.style.overflow = "hidden";
   addForm.reset();
-  const year = currentScreen.year || "freshman";
-  const month = currentScreen.month || 9;
+  photoFormKicker.textContent = editing ? "编辑照片模块" : "新增照片模块";
+  photoFormTitle.textContent = editing ? "修改这段记忆" : "把一段新记忆放进来";
+  photoSubmitButton.textContent = editing ? "保存修改" : "保存记忆";
+  const year = editing?.year || currentScreen.year || "freshman";
+  const month = editing?.month || currentScreen.month || 9;
   addForm.photoYear.value = year;
   addForm.photoMonth.value = String(month);
+  addForm.photoTitle.value = editing?.title || "";
+  addForm.photoDate.value = editing?.date || "";
+  addForm.photoPlace.value = editing?.place || "";
+  addForm.photoFeeling.value = editing?.feeling || "";
+  selectedFormTags = new Set(editing?.tags || []);
+  newTagInput.value = "";
+  renderTagEditor();
   addForm.photoTitle.focus();
 }
 
 function closeAddModal() {
+  editingMemoryId = null;
+  selectedFormTags = new Set();
   addModal.classList.remove("is-active");
   addModal.setAttribute("aria-hidden", "true");
-  document.body.style.overflow = "";
+  if (!detailOpen && !deleteModal.classList.contains("is-active") && !imageViewer.classList.contains("is-active")) {
+    document.body.style.overflow = "";
+  }
+}
+
+function openDeleteModal(memoryId) {
+  const memory = memories.find((item) => item.id === memoryId);
+  if (!memory) return;
+  pendingDeleteId = memoryId;
+  pendingTagDelete = null;
+  deleteModal.querySelector("h2").textContent = "确定删除这张照片吗？";
+  confirmDeleteButton.textContent = "移到回收箱";
+  deleteMessage.textContent = `《${memory.title}》会先放进回收箱，可以稍后恢复。`;
+  deleteModal.classList.add("is-active");
+  deleteModal.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+}
+
+function closeDeleteModal() {
+  pendingDeleteId = null;
+  pendingTagDelete = null;
+  deleteModal.querySelector("h2").textContent = "确定删除这张照片吗？";
+  confirmDeleteButton.textContent = "移到回收箱";
+  deleteModal.classList.remove("is-active");
+  deleteModal.setAttribute("aria-hidden", "true");
+  if (!detailOpen && !addModal.classList.contains("is-active") && !imageViewer.classList.contains("is-active")) {
+    document.body.style.overflow = "";
+  }
+}
+
+function confirmDeleteMemory() {
+  if (pendingTagDelete) {
+    deleteTag(pendingTagDelete);
+    return;
+  }
+  if (!pendingDeleteId) return;
+  const memory = memories.find((item) => item.id === pendingDeleteId);
+  if (!memory) {
+    closeDeleteModal();
+    return;
+  }
+  memory.deletedAt = new Date().toLocaleString("zh-CN", { hour12: false });
+  saveMemories();
+  closeDeleteModal();
+  initSphere();
+  if (currentScreen.type === "month") showMonth(currentScreen.year, currentScreen.month, activeFilter);
+  else showMain();
+}
+
+function restoreMemory(memoryId) {
+  const memory = memories.find((item) => item.id === memoryId);
+  if (!memory) return;
+  delete memory.deletedAt;
+  saveMemories();
+  initSphere();
+  showTrash();
+}
+
+function purgeMemory(memoryId) {
+  memories = memories.filter((memory) => memory.id !== memoryId);
+  saveMemories();
+  initSphere();
+  showTrash();
+}
+
+function renderTagEditor() {
+  const query = newTagInput.value.trim().toLowerCase();
+  const allTags = getAllTags();
+  const matches = query
+    ? allTags.filter((tag) => tag.toLowerCase().includes(query)).slice(0, 8)
+    : [];
+
+  selectedTagList.innerHTML = selectedFormTags.size
+    ? Array.from(selectedFormTags)
+        .map(
+          (tag) => `
+            <button class="selected-tag-chip" type="button" data-tag-action="unselect" data-tag-old="${escapeHtml(tag)}">
+              ${escapeHtml(tag)} <span>×</span>
+            </button>
+          `,
+        )
+        .join("")
+    : `<p class="tag-empty">还没选择 tag。</p>`;
+
+  tagPickList.innerHTML = query
+    ? matches.length
+      ? matches
+          .map(
+            (tag) => `
+              <button class="tag-suggestion ${selectedFormTags.has(tag) ? "is-selected" : ""}" type="button" data-tag-action="select" data-tag-old="${escapeHtml(tag)}">
+                ${escapeHtml(tag)}
+              </button>
+            `,
+          )
+          .join("")
+      : `<p class="tag-empty">没有匹配项，点“添加”可新增。</p>`
+    : `<p class="tag-empty">输入关键词搜索已有 tag。</p>`;
+
+  tagManageList.innerHTML = matches
+    .map(
+      (tag) => `
+        <div class="tag-manage-row">
+          <input type="text" value="${escapeHtml(tag)}" data-tag-old="${escapeHtml(tag)}" aria-label="编辑 tag ${escapeHtml(tag)}" />
+          <button class="small-button" type="button" data-tag-action="rename" data-tag-old="${escapeHtml(tag)}">改名</button>
+          <button class="small-button danger-button" type="button" data-tag-action="delete" data-tag-old="${escapeHtml(tag)}">删除</button>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function addTagFromInput() {
+  const tag = newTagInput.value.trim();
+  if (!tag) return;
+  selectedFormTags.add(tag);
+  newTagInput.value = "";
+  renderTagEditor();
+}
+
+function getSelectedFormTags() {
+  return new Set(selectedFormTags);
+}
+
+function renameTag(oldTag, newTag) {
+  const next = newTag.trim();
+  if (!oldTag || !next || oldTag === next) return;
+  memories.forEach((memory) => {
+    memory.tags = (memory.tags || []).map((tag) => (tag === oldTag ? next : tag));
+    memory.tags = Array.from(new Set(memory.tags));
+  });
+  saveMemories();
+  if (selectedFormTags.has(oldTag)) {
+    selectedFormTags.delete(oldTag);
+    selectedFormTags.add(next);
+  }
+  newTagInput.value = next;
+  renderTagEditor();
+  refreshCurrentScreen();
+}
+
+function openDeleteTagModal(tag) {
+  pendingTagDelete = tag;
+  pendingDeleteId = null;
+  deleteMessage.textContent = `删除 tag「${tag}」后，所有已上传照片里的这个 tag 都会被移除。`;
+  deleteModal.querySelector("h2").textContent = "确定删除这个 tag 吗？";
+  confirmDeleteButton.textContent = "删除 tag";
+  deleteModal.classList.add("is-active");
+  deleteModal.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+}
+
+function deleteTag(tag) {
+  memories.forEach((memory) => {
+    memory.tags = (memory.tags || []).filter((item) => item !== tag);
+    if (!memory.tags.length) memory.tags = ["新记忆"];
+  });
+  saveMemories();
+  pendingTagDelete = null;
+  closeDeleteModal();
+  selectedFormTags.delete(tag);
+  renderTagEditor();
+  refreshCurrentScreen();
+}
+
+function refreshCurrentScreen() {
+  if (currentScreen.type === "month") showMonth(currentScreen.year, currentScreen.month, activeFilter);
+  if (currentScreen.type === "year") showYear(currentScreen.year);
+  if (currentScreen.type === "main") showMain();
+  if (currentScreen.type === "pure") showPurePhotos();
+}
+
+function openImageViewer(memory) {
+  if (!memory) return;
+  viewerScale = 1;
+  viewerImage.src = memory.image;
+  viewerImage.alt = memory.title;
+  viewerImage.style.transform = "scale(1)";
+  imageViewer.classList.add("is-active");
+  imageViewer.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+}
+
+function closeImageViewer() {
+  imageViewer.classList.remove("is-active");
+  imageViewer.setAttribute("aria-hidden", "true");
+  viewerImage.removeAttribute("src");
+  viewerImage.alt = "";
+  if (!detailOpen && !addModal.classList.contains("is-active") && !deleteModal.classList.contains("is-active")) {
+    document.body.style.overflow = "";
+  }
+}
+
+function handleViewerWheel(event) {
+  if (!imageViewer.classList.contains("is-active")) return;
+  event.preventDefault();
+  const direction = event.deltaY > 0 ? -0.12 : 0.12;
+  viewerScale = Math.min(4, Math.max(0.45, viewerScale + direction));
+  viewerImage.style.transform = `scale(${viewerScale})`;
 }
 
 function populateMonthSelect() {
@@ -641,34 +1216,46 @@ async function handleAddSubmit(event) {
   if (!title) return;
 
   const file = formData.get("photoFile");
+  const editing = editingMemoryId ? memories.find((memory) => memory.id === editingMemoryId) : null;
   const image =
     file && file.size
       ? await readFileAsDataUrl(file)
-      : makeSampleImage(title, memories.length + 1);
+      : editing?.image || makeSampleImage(title, memories.length + 1);
 
   const year = String(formData.get("photoYear") || "freshman");
   const month = Number(formData.get("photoMonth") || 9);
-  const tags = String(formData.get("photoTags") || "")
-    .split(/[，,]/)
-    .map((tag) => tag.trim())
-    .filter(Boolean);
+  const tags = Array.from(getSelectedFormTags()).map((tag) => tag.trim()).filter(Boolean);
 
-  const memory = {
-    id: `user-${Date.now()}`,
-    year,
-    month,
-    title,
-    date: String(formData.get("photoDate") || ""),
-    place: String(formData.get("photoPlace") || "").trim(),
-    feeling: String(formData.get("photoFeeling") || "").trim(),
-    tags: tags.length ? tags : ["新记忆"],
-    image,
-    source: "user",
-  };
+  if (editing) {
+    Object.assign(editing, {
+      year,
+      month,
+      title,
+      date: String(formData.get("photoDate") || ""),
+      place: String(formData.get("photoPlace") || "").trim(),
+      feeling: String(formData.get("photoFeeling") || "").trim(),
+      tags: tags.length ? tags : ["新记忆"],
+      image,
+    });
+  } else {
+    const memory = {
+      id: `user-${Date.now()}`,
+      year,
+      month,
+      title,
+      date: String(formData.get("photoDate") || ""),
+      place: String(formData.get("photoPlace") || "").trim(),
+      feeling: String(formData.get("photoFeeling") || "").trim(),
+      tags: tags.length ? tags : ["新记忆"],
+      image,
+      source: "user",
+    };
+    memories = [memory, ...memories];
+  }
 
-  memories = [memory, ...memories];
   saveMemories();
   closeAddModal();
+  closeDetail();
   initSphere();
   showMonth(year, month);
 }
@@ -679,21 +1266,35 @@ function handlePageClick(event) {
     const action = actionTarget.dataset.action;
     if (action === "home") showHome();
     if (action === "main") showMain();
+    if (action === "pure") showPurePhotos();
+    if (action === "trash") showTrash();
     if (action === "year") showYear(actionTarget.dataset.year);
     if (action === "month") showMonth(actionTarget.dataset.year, Number(actionTarget.dataset.month));
     if (action === "filter") showMonth(currentScreen.year, currentScreen.month, actionTarget.dataset.tag);
     if (action === "add") openAddModal();
+    if (action === "delete") openDeleteModal(actionTarget.dataset.memoryId);
+    if (action === "restore") restoreMemory(actionTarget.dataset.memoryId);
+    if (action === "purge") purgeMemory(actionTarget.dataset.memoryId);
     if (action === "random") {
-      const memory = memories[Math.floor(Math.random() * memories.length)];
-      openDetail(memory);
+      const active = getActiveMemories();
+      const memory = active[Math.floor(Math.random() * active.length)];
+      if (memory) openDetail(memory);
     }
     return;
   }
 
+  if (event.target.closest(".card-feeling-panel")) return;
+
   const card = event.target.closest(".memory-card");
   if (card) {
-    const memory = memories.find((item) => item.id === card.dataset.memoryId);
+    const memory = memories.find((item) => item.id === card.dataset.memoryId && !item.deletedAt);
     if (memory) openDetail(memory, card);
+  }
+
+  const pureTile = event.target.closest(".pure-photo-tile");
+  if (pureTile) {
+    const memory = memories.find((item) => item.id === pureTile.dataset.memoryId && !item.deletedAt);
+    if (memory) openDetail(memory, pureTile);
   }
 }
 
@@ -710,19 +1311,62 @@ sphereStage.addEventListener("pointerdown", onSpherePointerDown);
 sphereStage.addEventListener("pointermove", onSpherePointerMove);
 sphereStage.addEventListener("pointerup", onSpherePointerUp);
 sphereStage.addEventListener("pointercancel", onSpherePointerUp);
+sphereStage.addEventListener("pointerleave", onSpherePointerLeave);
 pageView.addEventListener("click", handlePageClick);
 detailModal.addEventListener("click", (event) => {
   if (event.target.matches("[data-close-detail]")) closeDetail();
+  const editTarget = event.target.closest("[data-detail-action='edit']");
+  if (editTarget) openAddModal(editTarget.dataset.memoryId);
+  const imageTarget = event.target.closest("[data-view-image]");
+  if (imageTarget) {
+    const memory = memories.find((item) => item.id === imageTarget.dataset.viewImage);
+    openImageViewer(memory);
+  }
 });
 addModal.addEventListener("click", (event) => {
   if (event.target.matches("[data-close-add]")) closeAddModal();
+  const tagTarget = event.target.closest("[data-tag-action]");
+  if (tagTarget) {
+    const oldTag = tagTarget.dataset.tagOld;
+    if (tagTarget.dataset.tagAction === "select") {
+      selectedFormTags.add(oldTag);
+      renderTagEditor();
+    }
+    if (tagTarget.dataset.tagAction === "unselect") {
+      selectedFormTags.delete(oldTag);
+      renderTagEditor();
+    }
+    if (tagTarget.dataset.tagAction === "rename") {
+      const input = tagTarget.parentElement.querySelector("input");
+      renameTag(oldTag, input.value);
+    }
+    if (tagTarget.dataset.tagAction === "delete") openDeleteTagModal(oldTag);
+  }
 });
+addTagButton.addEventListener("click", addTagFromInput);
+newTagInput.addEventListener("input", renderTagEditor);
+newTagInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    addTagFromInput();
+  }
+});
+deleteModal.addEventListener("click", (event) => {
+  if (event.target.matches("[data-close-delete]")) closeDeleteModal();
+});
+confirmDeleteButton.addEventListener("click", confirmDeleteMemory);
+imageViewer.addEventListener("click", (event) => {
+  if (event.target.matches("[data-close-viewer]")) closeImageViewer();
+});
+imageViewer.addEventListener("wheel", handleViewerWheel, { passive: false });
 addForm.addEventListener("submit", handleAddSubmit);
 addForm.photoDate.addEventListener("change", handleDateChange);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closeDetail();
     closeAddModal();
+    closeDeleteModal();
+    closeImageViewer();
   }
 });
 
