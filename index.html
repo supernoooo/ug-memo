@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>大学四年生活纪念场 Demo</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <section class="home-view view is-active" id="homeView" aria-label="首页记忆球">
+        <div class="home-copy">
+          <p class="home-kicker">由照片组成的大学记忆星球</p>
+          <h1>四年记忆<br />正在旋转</h1>
+          <p class="home-subtitle">
+            拖动星球，点亮一张照片。点击任意照片，会把这段记忆请到屏幕中央。
+          </p>
+        </div>
+
+        <div class="sphere-stage" id="sphereStage" aria-label="可拖拽旋转的照片球">
+          <div class="sphere-orbit sphere-orbit-one"></div>
+          <div class="sphere-orbit sphere-orbit-two"></div>
+          <div class="sphere-layer" id="sphereLayer"></div>
+        </div>
+
+        <button class="enter-button" id="enterButton" type="button">
+          <span>进入四年</span>
+        </button>
+      </section>
+
+      <main class="page-view view" id="pageView" aria-live="polite"></main>
+    </div>
+
+    <div class="detail-modal" id="detailModal" aria-hidden="true">
+      <div class="detail-backdrop" data-close-detail></div>
+      <article class="detail-card" role="dialog" aria-modal="true" aria-label="照片详情"></article>
+    </div>
+
+    <div class="add-modal" id="addModal" aria-hidden="true">
+      <div class="add-backdrop" data-close-add></div>
+      <form class="add-panel" id="addForm">
+        <div class="form-heading">
+          <p class="panel-kicker">新增照片模块</p>
+          <h2>把一段新记忆放进来</h2>
+        </div>
+
+        <label class="field field-file">
+          <span>照片</span>
+          <input id="photoFile" name="photoFile" type="file" accept="image/*" />
+        </label>
+
+        <label class="field">
+          <span>标题</span>
+          <input id="photoTitle" name="photoTitle" type="text" placeholder="例如：操场边的晚风" required />
+        </label>
+
+        <div class="form-row">
+          <label class="field">
+            <span>拍摄日期</span>
+            <input id="photoDate" name="photoDate" type="date" />
+          </label>
+          <label class="field">
+            <span>地点</span>
+            <input id="photoPlace" name="photoPlace" type="text" placeholder="例如：图书馆门口" />
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label class="field">
+            <span>年级</span>
+            <select id="photoYear" name="photoYear">
+              <option value="freshman">大一</option>
+              <option value="sophomore">大二</option>
+              <option value="junior">大三</option>
+              <option value="senior">大四</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>月份</span>
+            <select id="photoMonth" name="photoMonth"></select>
+          </label>
+        </div>
+
+        <label class="field">
+          <span>我的感想</span>
+          <textarea id="photoFeeling" name="photoFeeling" rows="4" placeholder="写一点当时的心情"></textarea>
+        </label>
+
+        <label class="field">
+          <span>Tags</span>
+          <input id="photoTags" name="photoTags" type="text" placeholder="朋友, 课堂, 晚霞" />
+        </label>
+
+        <div class="form-actions">
+          <button class="plain-button" type="button" data-close-add>取消</button>
+          <button class="solid-button" type="submit">保存记忆</button>
+        </div>
+      </form>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
