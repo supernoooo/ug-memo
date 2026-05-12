@@ -3,11 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>大学四年生活纪念场 Demo</title>
+    <title>结结恩的本科四年:D</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Audiowide&family=Black+Ops+One&family=Noto+Serif+SC:wght@600;900&family=Orbitron:wght@700;900&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Audiowide&family=Bebas+Neue&family=Ceviche+One&family=Cormorant+Garamond:wght@600;700&family=Kaushan+Script&family=Lavishly+Yours&family=Noto+Serif+SC:wght@600;900&family=Orbitron:wght@700;900&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="styles.css" />
@@ -28,6 +28,12 @@
       </section>
 
       <main class="page-view view" id="pageView" aria-live="polite"></main>
+    </div>
+
+    <div class="music-dock" id="musicDock" aria-label="背景音乐控制">
+      <button class="music-toggle-button" id="musicToggleButton" type="button" disabled aria-label="播放或暂停背景音乐">♪</button>
+      <span class="music-status" id="musicStatus"><span class="music-status-text" id="musicStatusText">BGM loading</span></span>
+      <audio id="bgmPlayer" autoplay preload="auto"></audio>
     </div>
 
     <div class="detail-modal" id="detailModal" aria-hidden="true">
@@ -119,6 +125,35 @@
           <button class="plain-button" type="button" data-close-delete>取消</button>
           <button class="solid-button danger-button" type="button" id="confirmDeleteButton">移到回收箱</button>
         </div>
+      </section>
+    </div>
+
+    <div class="admin-modal" id="adminModal" aria-hidden="true">
+      <div class="admin-backdrop" data-close-admin></div>
+      <form class="admin-panel" id="adminForm" role="dialog" aria-modal="true" aria-label="管理员登录">
+        <p class="panel-kicker">管理员权限</p>
+        <h2>登录后才能修改照片</h2>
+        <label class="field">
+          <span>账号</span>
+          <input id="adminUsername" name="adminUsername" type="text" autocomplete="username" required />
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input id="adminPassword" name="adminPassword" type="password" autocomplete="current-password" required />
+        </label>
+        <p class="admin-error" id="adminError" role="alert"></p>
+        <div class="form-actions">
+          <button class="plain-button" type="button" data-close-admin>取消</button>
+          <button class="solid-button" type="submit">登录</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="admin-welcome" id="adminWelcome" aria-hidden="true">
+      <section class="admin-welcome-card" role="status" aria-live="polite">
+        <p class="panel-kicker">Welcome back</p>
+        <h2 id="adminWelcomeTitle">管理员已登录</h2>
+        <p id="adminWelcomeCopy">本次权限将在 30 分钟后过期。</p>
       </section>
     </div>
 
