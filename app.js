@@ -757,8 +757,11 @@ function rebuildSphereMeshes() {
   const points = fibonacciPoints(targetCount);
   sphere.items = points.map((point, index) => {
     const memory = sphereMemories[index];
-    const texture = makeCardTexture(memory, index);
-    const size = getSphereTileSize(targetCount);
+    let mesh = null;
+    const texture = makeCardTexture(memory, index, () => {
+      if (mesh) resizeSphereMeshToMedia(mesh, targetCount);
+    });
+    const size = getSphereTileSize(targetCount, memory);
     const geometry = new THREE.PlaneGeometry(size.width, size.height);
     const material = new THREE.MeshBasicMaterial({
       map: texture,
@@ -767,7 +770,7 @@ function rebuildSphereMeshes() {
       side: THREE.DoubleSide,
       depthWrite: false,
     });
-    const mesh = new THREE.Mesh(geometry, material);
+    mesh = new THREE.Mesh(geometry, material);
     const position = new THREE.Vector3(point.x, point.y, point.z).multiplyScalar(2.18);
     mesh.position.copy(position);
     mesh.lookAt(0, 0, 0);
@@ -783,13 +786,35 @@ function rebuildSphereMeshes() {
   });
 }
 
-function getSphereTileSize(count) {
-  if (count <= 1) return { width: 1.18, height: 1.48 };
-  if (count <= 6) return { width: 0.82, height: 1.04 };
-  if (count <= 14) return { width: 0.58, height: 0.72 };
-  if (count <= 32) return { width: 0.43, height: 0.54 };
-  if (count <= 80) return { width: 0.34, height: 0.42 };
-  return { width: 0.28, height: 0.35 };
+function clampMediaAspect(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 300 / 394;
+  return Math.min(16 / 9, Math.max(9 / 16, number));
+}
+
+function getMemoryMediaAspect(memory) {
+  return clampMediaAspect(memory?.mediaAspect || 300 / 394);
+}
+
+function getSphereBaseHeight(count) {
+  if (count <= 1) return 1.48;
+  if (count <= 6) return 1.04;
+  if (count <= 14) return 0.72;
+  if (count <= 32) return 0.54;
+  if (count <= 80) return 0.42;
+  return 0.35;
+}
+
+function getSphereTileSize(count, memory) {
+  const height = getSphereBaseHeight(count);
+  const aspect = getMemoryMediaAspect(memory);
+  return { width: height * aspect, height };
+}
+
+function resizeSphereMeshToMedia(mesh, count) {
+  const size = getSphereTileSize(count, mesh.userData.memory);
+  mesh.geometry?.dispose();
+  mesh.geometry = new THREE.PlaneGeometry(size.width, size.height);
 }
 
 function fibonacciPoints(count) {
@@ -809,10 +834,21 @@ function fibonacciPoints(count) {
   return points;
 }
 
-function makeCardTexture(memory, index) {
+function setCardTextureCanvasSize(canvas, aspect) {
+  const safeAspect = clampMediaAspect(aspect);
+  const longSide = 394;
+  if (safeAspect >= 1) {
+    canvas.width = longSide;
+    canvas.height = Math.round(longSide / safeAspect);
+  } else {
+    canvas.width = Math.round(longSide * safeAspect);
+    canvas.height = longSide;
+  }
+}
+
+function makeCardTexture(memory, index, onAspectChange) {
   const canvas = document.createElement("canvas");
-  canvas.width = 300;
-  canvas.height = 394;
+  setCardTextureCanvasSize(canvas, getMemoryMediaAspect(memory));
   const context = canvas.getContext("2d");
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -821,9 +857,18 @@ function makeCardTexture(memory, index) {
   drawCardTexture(context, memory, index);
   const image = new Image();
   image.onload = () => {
+    const nextAspect = clampMediaAspect(image.naturalWidth / image.naturalHeight);
+    if (Math.abs(nextAspect - getMemoryMediaAspect(memory)) > 0.01) {
+      memory.mediaAspect = nextAspect;
+      setCardTextureCanvasSize(canvas, nextAspect);
+      onAspectChange?.(nextAspect);
+    }
     drawCardTexture(context, memory, index, image);
     texture.needsUpdate = true;
   };
+  if (!/^(data:|blob:)/i.test(String(memory.image || ""))) {
+    image.crossOrigin = "anonymous";
+  }
   image.src = memory.image;
   return texture;
 }
@@ -2222,6 +2267,7 @@ addModal.addEventListener("click", (event) => {
     const oldTag = tagTarget.dataset.tagOld;
     if (tagTarget.dataset.tagAction === "select") {
       selectedFormTags.add(oldTag);
+      newTagInput.value = "";
       renderTagEditor();
       saveAddDraft();
     }
