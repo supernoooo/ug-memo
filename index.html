@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Audiowide&family=Bebas+Neue&family=Ceviche+One&family=Cormorant+Garamond:wght@600;700&family=Kaushan+Script&family=Lavishly+Yours&family=Noto+Serif+SC:wght@600;900&family=Orbitron:wght@700;900&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Audiowide&family=Bebas+Neue&family=Ceviche+One&family=Cormorant+Garamond:wght@600;700&family=Dancing+Script:wght@400;600&family=Kaushan+Script&family=Lavishly+Yours&family=Noto+Serif+SC:wght@600;900&family=Orbitron:wght@700;900&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="styles.css" />
@@ -32,6 +32,7 @@
 
     <div class="music-dock" id="musicDock" aria-label="背景音乐控制">
       <button class="music-toggle-button" id="musicToggleButton" type="button" disabled aria-label="播放或暂停背景音乐">♪</button>
+      <button class="music-next-button" id="musicNextButton" type="button" disabled aria-label="切换到下一首">▶▌</button>
       <span class="music-status" id="musicStatus"><span class="music-status-text" id="musicStatusText">BGM loading</span></span>
       <audio id="bgmPlayer" autoplay preload="auto"></audio>
     </div>
@@ -158,6 +159,7 @@
     </div>
 
     <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+    <script src="cloud-config.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

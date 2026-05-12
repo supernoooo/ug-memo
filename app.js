@@ -8,10 +8,10 @@ const yearLabels = {
 };
 
 const yearIntros = {
-  freshman: "刚抵达校园，一切都新得发亮。",
-  sophomore: "熟悉了路线，也开始有了自己的节奏。",
-  junior: "课程、项目、朋友和远行，把生活塞得很满。",
-  senior: "一些告别慢慢靠近，于是普通日子也开始发光。",
+  freshman: "来到新的城市、新的学校生活，好多事情都是第一次自己一个人干 ( *｀ω´)",
+  sophomore: "熟悉了日常的学习生活，每天卷卷地刷gpa @(・●・)@",
+  junior: "出去交换了半个学期超开心，这个学期的暑假开始接触具身智能啦 (⁎⁍̴̛ᴗ⁍̴̛⁎)",
+  senior: "上半学期出去实习了，发现日常的校园生活好珍贵，根本舍不得离开岗终身呀 (*☻-☻*)",
 };
 
 const monthOrder = [9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8];
@@ -21,6 +21,7 @@ const BGM_VOLUME = 0.18;
 const ADMIN_CONFIG_PATH = "./admin.json";
 const ADMIN_SESSION_KEY = "college-memory-admin-session";
 const ADMIN_SESSION_MS = 30 * 60 * 1000;
+const CLOUD_CONFIG = window.MEMORY_CLOUD_CONFIG || {};
 
 const samplePalette = [
   ["#ffd400", "#ff3d86", "#111111"],
@@ -82,6 +83,7 @@ const confirmDeleteButton = document.querySelector("#confirmDeleteButton");
 const imageViewer = document.querySelector("#imageViewer");
 const viewerImage = document.querySelector("#viewerImage");
 const musicToggleButton = document.querySelector("#musicToggleButton");
+const musicNextButton = document.querySelector("#musicNextButton");
 const musicStatus = document.querySelector("#musicStatus");
 const musicStatusText = document.querySelector("#musicStatusText");
 const bgmPlayer = document.querySelector("#bgmPlayer");
@@ -103,10 +105,12 @@ let pendingDeleteId = null;
 let editingMemoryId = null;
 let pendingTagDelete = null;
 let selectedFormTags = new Set();
+let photoSubmitPending = false;
 let viewerScale = 1;
 let bgmTracks = [];
 let bgmTrackIndex = 0;
 let bgmNeedsGesture = false;
+let bgmUserPaused = false;
 let adminAccountsPromise = null;
 let pendingAdminAction = null;
 let adminWelcomeTimer = 0;
@@ -216,6 +220,156 @@ function saveMemories() {
   }
 }
 
+function getCloudConfig() {
+  return {
+    url: String(CLOUD_CONFIG.url || "").replace(/\/$/, ""),
+    key: String(CLOUD_CONFIG.publishableKey || CLOUD_CONFIG.anonKey || ""),
+    table: String(CLOUD_CONFIG.table || "memories"),
+    bucket: String(CLOUD_CONFIG.bucket || "memories"),
+  };
+}
+
+function isCloudEnabled() {
+  const config = getCloudConfig();
+  return Boolean(config.url && config.key && config.table && config.bucket);
+}
+
+function cloudHeaders(extra = {}) {
+  const { key } = getCloudConfig();
+  return {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+    ...extra,
+  };
+}
+
+async function cloudFetch(path, options = {}) {
+  const { url } = getCloudConfig();
+  const response = await fetch(`${url}${path}`, options);
+  if (!response.ok) {
+    const message = await response.text().catch(() => "");
+    throw new Error(message || `Cloud request failed: ${response.status}`);
+  }
+  if (response.status === 204) return null;
+  return response.json().catch(() => null);
+}
+
+function cloudRowToMemory(row) {
+  return {
+    id: String(row.id),
+    year: row.year,
+    month: Number(row.month),
+    title: row.title,
+    date: row.date || "",
+    place: row.place || "",
+    feeling: row.feeling || "",
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    image: row.image_url,
+    imagePath: row.image_path || "",
+    source: row.source || "user",
+    deletedAt: row.deleted_at || undefined,
+  };
+}
+
+function memoryToCloudRow(memory) {
+  return {
+    id: memory.id,
+    year: memory.year,
+    month: Number(memory.month),
+    title: memory.title,
+    date: memory.date || "",
+    place: memory.place || "",
+    feeling: memory.feeling || "",
+    tags: memory.tags || [],
+    image_url: memory.image,
+    image_path: memory.imagePath || null,
+    source: memory.source || "user",
+    deleted_at: memory.deletedAt || null,
+    updated_at: new Date().toISOString(),
+  };
+}
+
+function safeFileName(name) {
+  return String(name || "photo")
+    .trim()
+    .replace(/[^\w.\-\u4e00-\u9fa5]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "photo";
+}
+
+function encodeStoragePath(path) {
+  return String(path).split("/").map(encodeURIComponent).join("/");
+}
+
+function getCloudPublicUrl(path) {
+  const { url, bucket } = getCloudConfig();
+  return `${url}/storage/v1/object/public/${encodeURIComponent(bucket)}/${encodeStoragePath(path)}`;
+}
+
+async function uploadImageToCloud(file, memoryId) {
+  if (!isCloudEnabled() || !file?.size) return null;
+  const { bucket } = getCloudConfig();
+  const path = `${memoryId}/${Date.now()}-${safeFileName(file.name)}`;
+  await cloudFetch(`/storage/v1/object/${encodeURIComponent(bucket)}/${encodeStoragePath(path)}`, {
+    method: "POST",
+    headers: cloudHeaders({
+      "content-type": file.type || "application/octet-stream",
+      "x-upsert": "true",
+    }),
+    body: file,
+  });
+  return {
+    image: getCloudPublicUrl(path),
+    imagePath: path,
+  };
+}
+
+async function fetchCloudMemories() {
+  if (!isCloudEnabled()) return null;
+  const { table } = getCloudConfig();
+  const rows = await cloudFetch(`/rest/v1/${encodeURIComponent(table)}?select=*&order=created_at.desc`, {
+    headers: cloudHeaders(),
+  });
+  return Array.isArray(rows) ? rows.map(cloudRowToMemory) : [];
+}
+
+async function persistMemory(memory) {
+  saveMemories();
+  if (!isCloudEnabled() || memory.source === "sample") return;
+  const { table } = getCloudConfig();
+  await cloudFetch(`/rest/v1/${encodeURIComponent(table)}?on_conflict=id`, {
+    method: "POST",
+    headers: cloudHeaders({
+      "content-type": "application/json",
+      Prefer: "resolution=merge-duplicates,return=minimal",
+    }),
+    body: JSON.stringify(memoryToCloudRow(memory)),
+  }).catch((error) => console.warn("无法同步照片到云端", error));
+}
+
+async function removeMemoryFromCloud(memory) {
+  if (!isCloudEnabled() || !memory || memory.source === "sample") return;
+  const { table } = getCloudConfig();
+  await cloudFetch(`/rest/v1/${encodeURIComponent(table)}?id=eq.${encodeURIComponent(memory.id)}`, {
+    method: "DELETE",
+    headers: cloudHeaders(),
+  }).catch((error) => console.warn("无法从云端删除照片记录", error));
+}
+
+async function initializeCloudMemories() {
+  if (!isCloudEnabled()) return;
+  try {
+    const cloudMemories = await fetchCloudMemories();
+    if (cloudMemories?.length) {
+      memories = cloudMemories;
+      saveMemories();
+      initSphere();
+      refreshCurrentScreen();
+    }
+  } catch (error) {
+    console.warn("无法读取云端照片，继续使用本地数据", error);
+  }
+}
+
 function normalizeAdminAccounts(config) {
   const list = Array.isArray(config)
     ? config
@@ -271,7 +425,7 @@ function saveAdminSession(username) {
 
 function showAdminWelcome(username) {
   window.clearTimeout(adminWelcomeTimer);
-  adminWelcomeTitle.textContent = `欢迎回来，${username}`;
+  adminWelcomeTitle.textContent = `Welcome back, ${username}!`;
   adminWelcomeCopy.textContent = "管理员权限已开启，30 分钟内无需再次登录。";
   adminWelcome.classList.remove("is-leaving");
   adminWelcome.classList.add("is-active");
@@ -355,6 +509,22 @@ function formatMonth(month) {
 
 function getActiveMemories() {
   return memories.filter((memory) => !memory.deletedAt);
+}
+
+function getMemoryShuffleRank(memory) {
+  const key = String(memory.id || memory.title || "");
+  let hash = 2166136261;
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function getSphereMemories() {
+  return getActiveMemories()
+    .slice()
+    .sort((first, second) => getMemoryShuffleRank(first) - getMemoryShuffleRank(second));
 }
 
 function getTrashedMemories() {
@@ -507,7 +677,7 @@ function rebuildSphereMeshes() {
     child.material?.dispose();
   }
 
-  const sphereMemories = getActiveMemories();
+  const sphereMemories = getSphereMemories();
   const targetCount = sphereMemories.length;
   const points = fibonacciPoints(targetCount);
   sphere.items = points.map((point, index) => {
@@ -830,7 +1000,7 @@ function initFallbackSphere() {
   sphereStage.innerHTML = "";
   const fallback = document.createElement("div");
   fallback.className = "fallback-sphere";
-  const list = memories.slice(0, 48);
+  const list = getSphereMemories().slice(0, 48);
   list.forEach((memory, index) => {
     const item = document.createElement("button");
     item.className = "memory-tile";
@@ -868,7 +1038,7 @@ function showMain() {
     <div class="page-inner">
       <section class="hero-panel">
         <div class="top-badge">已收录 ${activeCount} 段大学记忆</div>
-        <h1>本诺诺的本科生活</h1>
+        <h1>结结恩的本科生活</h1>
         <p class="hero-copy">
           欢迎来到我的时光胶囊机🥰~
         </p>
@@ -927,7 +1097,7 @@ function showYear(year) {
       <section class="page-heading">
         <div class="top-badge">${yearLabels[year]}记忆档案</div>
         <h1>${yearLabels[year]}的十二个月</h1>
-        <p class="page-copy">${yearIntros[year]} 月份按大学学年排列，从9月开始，到第二年8月结束。</p>
+        <p class="page-copy">${yearIntros[year]}</p>
         <div class="heading-actions">
           <button class="plain-button" type="button" data-action="main">返回上一级</button>
         </div>
@@ -955,7 +1125,7 @@ function showMonth(year, month, filter = "全部") {
       <section class="page-heading">
         <div class="top-badge">${yearLabels[year]} · ${formatMonth(month)}</div>
         <h1>${formatMonth(month)}记忆盒</h1>
-        <p class="page-copy">这里陈列这个月份的照片模块。照片多的时候，可以先按 tag 快速筛选。</p>
+        <p class="page-copy">可以先按 tag 快速筛选，点击照片模块看看吧~~</p>
         <div class="heading-actions">
           <button class="plain-button" type="button" data-action="year" data-year="${year}">返回上一级</button>
         </div>
@@ -1142,13 +1312,13 @@ function closeDetail() {
 function openAddModal(memoryId = null) {
   editingMemoryId = memoryId;
   const editing = memoryId ? memories.find((memory) => memory.id === memoryId) : null;
+  setPhotoSubmitPending(false, editing ? "保存修改" : "保存记忆");
   addModal.classList.add("is-active");
   addModal.setAttribute("aria-hidden", "false");
   document.body.style.overflow = "hidden";
   addForm.reset();
   photoFormKicker.textContent = editing ? "编辑照片模块" : "新增照片模块";
   photoFormTitle.textContent = editing ? "修改这段记忆" : "把一段新记忆放进来";
-  photoSubmitButton.textContent = editing ? "保存修改" : "保存记忆";
   const year = editing?.year || currentScreen.year || "freshman";
   const month = editing?.month || currentScreen.month || 9;
   addForm.photoYear.value = year;
@@ -1166,6 +1336,7 @@ function openAddModal(memoryId = null) {
 function closeAddModal() {
   editingMemoryId = null;
   selectedFormTags = new Set();
+  setPhotoSubmitPending(false);
   addModal.classList.remove("is-active");
   addModal.setAttribute("aria-hidden", "true");
   if (
@@ -1224,7 +1395,7 @@ function confirmDeleteMemory() {
     return;
   }
   memory.deletedAt = new Date().toLocaleString("zh-CN", { hour12: false });
-  saveMemories();
+  persistMemory(memory);
   closeDeleteModal();
   initSphere();
   if (currentScreen.type === "month") showMonth(currentScreen.year, currentScreen.month, activeFilter);
@@ -1239,7 +1410,7 @@ function restoreMemory(memoryId) {
   const memory = memories.find((item) => item.id === memoryId);
   if (!memory) return;
   delete memory.deletedAt;
-  saveMemories();
+  persistMemory(memory);
   initSphere();
   showTrash();
 }
@@ -1249,8 +1420,10 @@ function purgeMemory(memoryId) {
     requireAdmin(() => purgeMemory(memoryId));
     return;
   }
-  memories = memories.filter((memory) => memory.id !== memoryId);
+  const memory = memories.find((item) => item.id === memoryId);
+  memories = memories.filter((item) => item.id !== memoryId);
   saveMemories();
+  removeMemoryFromCloud(memory);
   initSphere();
   showTrash();
 }
@@ -1325,6 +1498,7 @@ function renameTag(oldTag, newTag) {
     memory.tags = Array.from(new Set(memory.tags));
   });
   saveMemories();
+  memories.filter((memory) => memory.source !== "sample").forEach((memory) => persistMemory(memory));
   if (selectedFormTags.has(oldTag)) {
     selectedFormTags.delete(oldTag);
     selectedFormTags.add(next);
@@ -1355,6 +1529,7 @@ function deleteTag(tag) {
     if (!memory.tags.length) memory.tags = ["新记忆"];
   });
   saveMemories();
+  memories.filter((memory) => memory.source !== "sample").forEach((memory) => persistMemory(memory));
   pendingTagDelete = null;
   closeDeleteModal();
   selectedFormTags.delete(tag);
@@ -1405,10 +1580,11 @@ function setMusicStatus(text) {
 }
 
 function updateMusicMarquee() {
+  musicStatus.classList.remove("is-marquee");
   const overflow = musicStatusText.scrollWidth - musicStatus.clientWidth;
   musicStatus.classList.toggle("is-marquee", overflow > 6);
   musicStatus.style.setProperty("--music-scroll-distance", `${Math.max(0, overflow + 18)}px`);
-  musicStatus.style.setProperty("--music-scroll-duration", `${Math.min(18, Math.max(7, overflow / 18))}s`);
+  musicStatus.style.setProperty("--music-scroll-duration", `${Math.min(36, Math.max(14, overflow / 9))}s`);
 }
 
 function getTrackName(url) {
@@ -1420,24 +1596,44 @@ function getTrackName(url) {
   }
 }
 
+function resolveProjectBgmUrl(url) {
+  const value = String(url || "").trim();
+  if (!value) return "";
+  if (/^(https?:|data:|blob:|\/|\.\/|\.\.\/)/i.test(value)) return value;
+  if (value.startsWith("music/")) return value;
+  return `music/${value}`;
+}
+
 function normalizeBgmEntry(entry) {
   const url = typeof entry === "string" ? entry : entry?.url || entry?.src || "";
   if (!url) return null;
+  const resolvedUrl = resolveProjectBgmUrl(url);
   return {
-    name: typeof entry === "object" && entry.name ? entry.name : getTrackName(url),
-    url,
+    name: typeof entry === "object" && entry.name ? entry.name : getTrackName(resolvedUrl),
+    url: resolvedUrl,
   };
 }
 
+function shuffleBgmTracks(tracks) {
+  const shuffled = tracks.slice();
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+  }
+  if (shuffled.length > 1 && shuffled.every((track, index) => track === tracks[index])) {
+    shuffled.push(shuffled.shift());
+  }
+  return shuffled;
+}
+
 function setBgmTracks(tracks) {
-  bgmTracks = tracks
-    .map(normalizeBgmEntry)
-    .filter(Boolean)
-    .sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
+  bgmTracks = shuffleBgmTracks(tracks.map(normalizeBgmEntry).filter(Boolean));
   bgmTrackIndex = 0;
+  bgmUserPaused = false;
   bgmPlayer.pause();
   bgmPlayer.removeAttribute("src");
   musicToggleButton.disabled = !bgmTracks.length;
+  musicNextButton.disabled = bgmTracks.length <= 1;
 
   if (!bgmTracks.length) {
     setMusicStatus("BGM waiting");
@@ -1456,13 +1652,7 @@ async function loadProjectBgm() {
     if (response.ok) {
       const playlist = await response.json();
       if (Array.isArray(playlist)) {
-        tracks = playlist.map((entry) => {
-          if (typeof entry === "string" && !entry.includes("/")) return `music/${entry}`;
-          if (entry && typeof entry === "object" && entry.url && !entry.url.includes("/")) {
-            return { ...entry, url: `music/${entry.url}` };
-          }
-          return entry;
-        });
+        tracks = playlist;
       }
     }
   } catch (error) {
@@ -1474,6 +1664,7 @@ async function loadProjectBgm() {
 
 function playBgmTrack(index) {
   if (!bgmTracks.length) return;
+  bgmUserPaused = false;
   bgmTrackIndex = (index + bgmTracks.length) % bgmTracks.length;
   const track = bgmTracks[bgmTrackIndex];
   bgmPlayer.volume = BGM_VOLUME;
@@ -1482,9 +1673,11 @@ function playBgmTrack(index) {
   bgmPlayer.autoplay = true;
   setMusicStatus(track.name);
   musicToggleButton.textContent = "Ⅱ";
+  musicToggleButton.classList.add("is-playing");
   bgmPlayer.play().catch(() => {
     bgmNeedsGesture = true;
     musicToggleButton.textContent = "♪";
+    musicToggleButton.classList.remove("is-playing");
     setMusicStatus(track.name);
   });
 }
@@ -1493,29 +1686,48 @@ function toggleBgm() {
   if (!bgmTracks.length) return;
   bgmPlayer.volume = BGM_VOLUME;
   if (bgmPlayer.paused) {
+    bgmUserPaused = false;
     bgmPlayer.play().then(() => {
       bgmNeedsGesture = false;
       musicToggleButton.textContent = "Ⅱ";
+      musicToggleButton.classList.add("is-playing");
     }).catch(() => {
       bgmNeedsGesture = true;
     });
   } else {
+    bgmUserPaused = true;
     bgmPlayer.pause();
     musicToggleButton.textContent = "♪";
+    musicToggleButton.classList.remove("is-playing");
   }
 }
 
 function playNextBgmTrack() {
   if (bgmTracks.length <= 1) return;
+  if (bgmTrackIndex >= bgmTracks.length - 1) {
+    const currentUrl = bgmTracks[bgmTrackIndex]?.url;
+    bgmTracks = shuffleBgmTracks(bgmTracks);
+    if (bgmTracks[0]?.url === currentUrl) {
+      bgmTracks.push(bgmTracks.shift());
+    }
+    playBgmTrack(0);
+    return;
+  }
   playBgmTrack(bgmTrackIndex + 1);
 }
 
+function handleBgmEnded() {
+  if (bgmUserPaused) return;
+  playNextBgmTrack();
+}
+
 function unlockBgmAfterGesture() {
-  if (!bgmNeedsGesture || !bgmTracks.length || !bgmPlayer.paused) return;
+  if (!bgmNeedsGesture || bgmUserPaused || !bgmTracks.length || !bgmPlayer.paused) return;
   bgmPlayer.volume = BGM_VOLUME;
   bgmPlayer.play().then(() => {
     bgmNeedsGesture = false;
     musicToggleButton.textContent = "Ⅱ";
+    musicToggleButton.classList.add("is-playing");
   }).catch(() => {
     bgmNeedsGesture = true;
   });
@@ -1591,8 +1803,21 @@ function readFileAsDataUrl(file) {
   });
 }
 
+function setPhotoSubmitPending(isPending, label = "") {
+  photoSubmitPending = isPending;
+  photoSubmitButton.disabled = isPending;
+  photoSubmitButton.classList.toggle("is-loading", isPending);
+  if (label) photoSubmitButton.dataset.idleText = label;
+  if (isPending) {
+    photoSubmitButton.innerHTML = '<span class="button-spinner" aria-hidden="true"></span><span>上传中...</span>';
+    return;
+  }
+  photoSubmitButton.textContent = photoSubmitButton.dataset.idleText || "保存记忆";
+}
+
 async function handleAddSubmit(event) {
   event.preventDefault();
+  if (photoSubmitPending) return;
   if (!isAdminSessionValid()) {
     requireAdmin(() => addForm.requestSubmit());
     return;
@@ -1600,50 +1825,73 @@ async function handleAddSubmit(event) {
   const formData = new FormData(addForm);
   const title = String(formData.get("photoTitle") || "").trim();
   if (!title) return;
+  setPhotoSubmitPending(true);
 
-  const file = formData.get("photoFile");
   const editing = editingMemoryId ? memories.find((memory) => memory.id === editingMemoryId) : null;
-  const image =
-    file && file.size
-      ? await readFileAsDataUrl(file)
-      : editing?.image || makeSampleImage(title, memories.length + 1);
-
   const year = String(formData.get("photoYear") || "freshman");
   const month = Number(formData.get("photoMonth") || 9);
   const tags = Array.from(getSelectedFormTags()).map((tag) => tag.trim()).filter(Boolean);
+  const file = formData.get("photoFile");
+  const memoryId = editing?.id || `user-${Date.now()}`;
+  let image = editing?.image || makeSampleImage(title, memories.length + 1);
+  let imagePath = editing?.imagePath || "";
 
-  if (editing) {
-    Object.assign(editing, {
-      year,
-      month,
-      title,
-      date: String(formData.get("photoDate") || ""),
-      place: String(formData.get("photoPlace") || "").trim(),
-      feeling: String(formData.get("photoFeeling") || "").trim(),
-      tags: tags.length ? tags : ["新记忆"],
-      image,
-    });
-  } else {
-    const memory = {
-      id: `user-${Date.now()}`,
-      year,
-      month,
-      title,
-      date: String(formData.get("photoDate") || ""),
-      place: String(formData.get("photoPlace") || "").trim(),
-      feeling: String(formData.get("photoFeeling") || "").trim(),
-      tags: tags.length ? tags : ["新记忆"],
-      image,
-      source: "user",
-    };
-    memories = [memory, ...memories];
+  try {
+    if (file && file.size) {
+      const uploaded = await uploadImageToCloud(file, memoryId).catch((error) => {
+        console.warn("云端图片上传失败，改用本地临时图片", error);
+        return null;
+      });
+      if (uploaded) {
+        image = uploaded.image;
+        imagePath = uploaded.imagePath;
+      } else {
+        image = await readFileAsDataUrl(file);
+        imagePath = "";
+      }
+    }
+
+    if (editing) {
+      Object.assign(editing, {
+        year,
+        month,
+        title,
+        date: String(formData.get("photoDate") || ""),
+        place: String(formData.get("photoPlace") || "").trim(),
+        feeling: String(formData.get("photoFeeling") || "").trim(),
+        tags: tags.length ? tags : ["新记忆"],
+        image,
+        imagePath,
+      });
+      await persistMemory(editing);
+    } else {
+      const memory = {
+        id: memoryId,
+        year,
+        month,
+        title,
+        date: String(formData.get("photoDate") || ""),
+        place: String(formData.get("photoPlace") || "").trim(),
+        feeling: String(formData.get("photoFeeling") || "").trim(),
+        tags: tags.length ? tags : ["新记忆"],
+        image,
+        imagePath,
+        source: "user",
+      };
+      memories = [memory, ...memories];
+      await persistMemory(memory);
+    }
+
+    saveMemories();
+    closeAddModal();
+    closeDetail();
+    initSphere();
+    showMonth(year, month);
+  } catch (error) {
+    console.warn("保存照片失败", error);
+    window.alert("保存失败，请稍后再试。");
+    setPhotoSubmitPending(false);
   }
-
-  saveMemories();
-  closeAddModal();
-  closeDetail();
-  initSphere();
-  showMonth(year, month);
 }
 
 function handlePageClick(event) {
@@ -1752,7 +2000,8 @@ addForm.addEventListener("submit", handleAddSubmit);
 adminForm.addEventListener("submit", handleAdminSubmit);
 addForm.photoDate.addEventListener("change", handleDateChange);
 musicToggleButton.addEventListener("click", toggleBgm);
-bgmPlayer.addEventListener("ended", playNextBgmTrack);
+musicNextButton.addEventListener("click", playNextBgmTrack);
+bgmPlayer.addEventListener("ended", handleBgmEnded);
 document.addEventListener("pointermove", createCometTrail);
 window.addEventListener("pointerdown", createPointerBurst, { capture: true, passive: true });
 document.addEventListener("pointerdown", unlockBgmAfterGesture);
@@ -1771,3 +2020,4 @@ populateMonthSelect();
 initSphere();
 bgmPlayer.volume = BGM_VOLUME;
 loadProjectBgm();
+initializeCloudMemories();
