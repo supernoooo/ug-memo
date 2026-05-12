@@ -75,8 +75,8 @@ button {
   left: clamp(14px, 3vw, 28px);
   bottom: clamp(14px, 3vw, 28px);
   display: grid;
-  grid-template-columns: auto minmax(120px, 230px);
-  gap: 9px;
+  grid-template-columns: auto auto minmax(120px, 230px);
+  gap: 8px;
   align-items: center;
   max-width: calc(100vw - 28px);
   padding: 0;
@@ -88,7 +88,8 @@ button {
   transform: translateY(1em);
 }
 
-.music-toggle-button {
+.music-toggle-button,
+.music-next-button {
   display: inline-flex;
   width: 34px;
   height: 34px;
@@ -103,6 +104,7 @@ button {
   font-family: "Lavishly Yours", "Cormorant Garamond", cursive;
   font-size: 34px;
   line-height: 1;
+  transform-origin: center;
   text-shadow:
     0 0 12px rgba(255, 255, 255, 0.32),
     0 0 28px rgba(159, 228, 255, 0.2);
@@ -113,11 +115,29 @@ button {
     transform 150ms ease;
 }
 
-.music-toggle-button:disabled {
+.music-toggle-button.is-playing {
+  align-items: flex-start;
+  padding-top: 9px;
+  font-family: "Arial Black", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 17px;
+  letter-spacing: 0;
+  line-height: 1.2;
+}
+
+.music-next-button {
+  font-family: "Arial Black", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 17px;
+  letter-spacing: 0;
+  text-indent: -0.12em;
+}
+
+.music-toggle-button:disabled,
+.music-next-button:disabled {
   opacity: 0.42;
 }
 
-.music-toggle-button:not(:disabled):hover {
+.music-toggle-button:not(:disabled):hover,
+.music-next-button:not(:disabled):hover {
   color: #fff;
   text-shadow:
     0 0 12px rgba(255, 255, 255, 0.82),
@@ -125,7 +145,8 @@ button {
     0 0 54px rgba(255, 212, 0, 0.24);
 }
 
-.music-toggle-button:not(:disabled):active {
+.music-toggle-button:not(:disabled):active,
+.music-next-button:not(:disabled):active {
   transform: scale(1.12);
 }
 
@@ -133,7 +154,7 @@ button {
   min-width: 0;
   overflow: hidden;
   color: rgba(255, 253, 243, 0.86);
-  font-family: "Lavishly Yours", "Cormorant Garamond", cursive;
+  font-family: "Dancing Script", "Cormorant Garamond", cursive;
   font-size: clamp(14px, 1.9vw, 24px);
   font-weight: 400;
   line-height: 1.45;
@@ -158,7 +179,8 @@ button {
 }
 
 .music-status.is-marquee .music-status-text {
-  animation: musicNameScroll var(--music-scroll-duration, 9s) ease-in-out infinite alternate;
+  padding-left: 100%;
+  animation: musicNameScroll var(--music-scroll-duration, 9s) linear infinite;
 }
 
 .click-burst {
@@ -685,9 +707,41 @@ button.memory-tile {
   box-shadow: 7px 7px 0 var(--shadow);
 }
 
+.plain-button:disabled,
+.solid-button:disabled,
+.small-button:disabled,
+.chip-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+  transform: none;
+  box-shadow: 5px 5px 0 var(--shadow);
+}
+
 .solid-button {
   color: #fff;
   background: var(--ink);
+}
+
+.solid-button.is-loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+}
+
+.button-spinner {
+  width: 1em;
+  height: 1em;
+  border: 2px solid rgba(255, 253, 243, 0.42);
+  border-top-color: #fffdf3;
+  border-radius: 50%;
+  animation: buttonSpin 720ms linear infinite;
+}
+
+@keyframes buttonSpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .year-grid {
@@ -1757,7 +1811,7 @@ button.memory-tile {
     transform: translateX(0);
   }
   to {
-    transform: translateX(calc(var(--music-scroll-distance, 0px) * -1));
+    transform: translateX(-100%);
   }
 }
 
@@ -1818,7 +1872,7 @@ button.memory-tile {
   }
 
   .music-dock {
-    grid-template-columns: auto minmax(0, 180px);
+    grid-template-columns: auto auto minmax(0, 180px);
   }
 
   .music-status {
