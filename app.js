@@ -18,7 +18,6 @@ const monthOrder = [9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8];
 const PROJECT_BGM_PLAYLIST = "./music/playlist.json";
 const PROJECT_BGM_FILES = [];
 const BGM_VOLUME = 0.18;
-const ADMIN_CONFIG_PATH = "./admin.json";
 const ADMIN_SESSION_KEY = "college-memory-admin-session";
 const ADMIN_SESSION_MS = 30 * 60 * 1000;
 const CLOUD_CONFIG = window.MEMORY_CLOUD_CONFIG || {};
@@ -111,7 +110,6 @@ let bgmTracks = [];
 let bgmTrackIndex = 0;
 let bgmNeedsGesture = false;
 let bgmUserPaused = false;
-let adminAccountsPromise = null;
 let pendingAdminAction = null;
 let adminWelcomeTimer = 0;
 let lastTrailTime = 0;
@@ -234,13 +232,17 @@ function isCloudEnabled() {
   return Boolean(config.url && config.key && config.table && config.bucket);
 }
 
-function cloudHeaders(extra = {}) {
+function cloudHeadersWithToken(accessToken, extra = {}) {
   const { key } = getCloudConfig();
   return {
     apikey: key,
-    Authorization: `Bearer ${key}`,
+    Authorization: `Bearer ${accessToken || key}`,
     ...extra,
   };
+}
+
+function cloudHeaders(extra = {}) {
+  return cloudHeadersWithToken(getAdminAccessToken(), extra);
 }
 
 async function cloudFetch(path, options = {}) {
@@ -370,34 +372,6 @@ async function initializeCloudMemories() {
   }
 }
 
-function normalizeAdminAccounts(config) {
-  const list = Array.isArray(config)
-    ? config
-    : config?.admins || config?.accounts || config?.users || (config?.username && config?.password ? [config] : []);
-  return list
-    .map((account) => ({
-      username: String(account?.username || account?.user || "").trim(),
-      password: String(account?.password || account?.pass || ""),
-    }))
-    .filter((account) => account.username && account.password);
-}
-
-async function loadAdminAccounts() {
-  if (!adminAccountsPromise) {
-    adminAccountsPromise = fetch(ADMIN_CONFIG_PATH, { cache: "no-store" })
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json();
-      })
-      .then(normalizeAdminAccounts)
-      .catch((error) => {
-        console.warn("无法读取管理员账号配置", error);
-        return [];
-      });
-  }
-  return adminAccountsPromise;
-}
-
 function getAdminSession() {
   try {
     return JSON.parse(localStorage.getItem(ADMIN_SESSION_KEY) || "null");
@@ -408,24 +382,74 @@ function getAdminSession() {
 
 function isAdminSessionValid() {
   const session = getAdminSession();
-  if (session?.expiresAt && Number(session.expiresAt) > Date.now()) return true;
+  if (session?.accessToken && session?.expiresAt && Number(session.expiresAt) > Date.now()) return true;
   localStorage.removeItem(ADMIN_SESSION_KEY);
   return false;
 }
 
-function saveAdminSession(username) {
+function getAdminAccessToken() {
+  const session = getAdminSession();
+  if (session?.accessToken && session?.expiresAt && Number(session.expiresAt) > Date.now()) {
+    return session.accessToken;
+  }
+  localStorage.removeItem(ADMIN_SESSION_KEY);
+  return "";
+}
+
+async function signInAdmin(email, password) {
+  if (!isCloudEnabled()) throw new Error("Supabase 尚未配置。");
+  const { url } = getCloudConfig();
+  const response = await fetch(`${url}/auth/v1/token?grant_type=password`, {
+    method: "POST",
+    headers: cloudHeadersWithToken("", {
+      "content-type": "application/json",
+    }),
+    body: JSON.stringify({ email, password }),
+  });
+  if (!response.ok) {
+    throw new Error(await response.text().catch(() => "Supabase Auth 登录失败。"));
+  }
+  const auth = await response.json();
+  const isAdmin = await verifyAdminAccess(auth.access_token);
+  if (!isAdmin) throw new Error("当前账号没有管理员权限。");
+  return {
+    email: auth.user?.email || email,
+    accessToken: auth.access_token,
+    refreshToken: auth.refresh_token || "",
+    expiresIn: Number(auth.expires_in || ADMIN_SESSION_MS / 1000),
+  };
+}
+
+async function verifyAdminAccess(accessToken) {
+  const result = await cloudFetch("/rest/v1/rpc/is_memory_admin", {
+    method: "POST",
+    headers: cloudHeadersWithToken(accessToken, {
+      "content-type": "application/json",
+    }),
+    body: "{}",
+  }).catch((error) => {
+    console.warn("无法验证管理员权限", error);
+    return false;
+  });
+  return result === true;
+}
+
+function saveAdminSession(auth) {
+  const expiresInMs = Math.max(0, Number(auth.expiresIn || 0) * 1000);
   localStorage.setItem(
     ADMIN_SESSION_KEY,
     JSON.stringify({
-      username,
-      expiresAt: Date.now() + ADMIN_SESSION_MS,
+      username: auth.email,
+      accessToken: auth.accessToken,
+      refreshToken: auth.refreshToken,
+      expiresAt: Date.now() + Math.min(ADMIN_SESSION_MS, expiresInMs || ADMIN_SESSION_MS),
     }),
   );
 }
 
 function showAdminWelcome(username) {
   window.clearTimeout(adminWelcomeTimer);
-  adminWelcomeTitle.textContent = `Welcome back, ${username}!`;
+  adminWelcomeTitle.textContent = `Welcome back, supernooo!`;
   adminWelcomeCopy.textContent = "管理员权限已开启，30 分钟内无需再次登录。";
   adminWelcome.classList.remove("is-leaving");
   adminWelcome.classList.add("is-active");
@@ -475,23 +499,23 @@ function requireAdmin(action) {
 async function handleAdminSubmit(event) {
   event.preventDefault();
   adminError.textContent = "";
-  const username = adminUsername.value.trim();
+  const email = adminUsername.value.trim();
   const password = adminPassword.value;
-  const accounts = await loadAdminAccounts();
-  const matched = accounts.some((account) => account.username === username && account.password === password);
+  if (!email || !password) return;
 
-  if (!matched) {
-    adminError.textContent = accounts.length ? "账号或密码不正确。" : "没有读取到可用管理员账号。";
+  try {
+    const auth = await signInAdmin(email, password);
+    const action = pendingAdminAction;
+    saveAdminSession(auth);
+    closeAdminModal();
+    showAdminWelcome(auth.email);
+    if (action) action();
+  } catch (error) {
+    console.warn("管理员登录失败", error);
+    adminError.textContent = "邮箱、密码或管理员权限不正确。";
     adminPassword.value = "";
     adminPassword.focus();
-    return;
   }
-
-  const action = pendingAdminAction;
-  saveAdminSession(username);
-  closeAdminModal();
-  showAdminWelcome(username);
-  if (action) action();
 }
 
 function escapeHtml(value) {
