@@ -20,6 +20,7 @@ const PROJECT_BGM_FILES = [];
 const BGM_VOLUME = 0.18;
 const ADMIN_SESSION_KEY = "college-memory-admin-session";
 const ADMIN_SESSION_MS = 30 * 60 * 1000;
+const ADD_DRAFT_KEY = "college-memory-add-draft-v1";
 const CLOUD_CONFIG = window.MEMORY_CLOUD_CONFIG || {};
 
 const samplePalette = [
@@ -71,6 +72,7 @@ const photoMonthSelect = document.querySelector("#photoMonth");
 const photoFormKicker = document.querySelector("#photoFormKicker");
 const photoFormTitle = document.querySelector("#photoFormTitle");
 const photoSubmitButton = document.querySelector("#photoSubmitButton");
+const draftMediaNote = document.querySelector("#draftMediaNote");
 const selectedTagList = document.querySelector("#selectedTagList");
 const tagPickList = document.querySelector("#tagPickList");
 const tagManageList = document.querySelector("#tagManageList");
@@ -105,6 +107,8 @@ let editingMemoryId = null;
 let pendingTagDelete = null;
 let selectedFormTags = new Set();
 let photoSubmitPending = false;
+let addDraftMediaFile = null;
+let isRestoringAddDraft = false;
 let viewerScale = 1;
 let bgmTracks = [];
 let bgmTrackIndex = 0;
@@ -212,7 +216,8 @@ function loadMemories() {
 
 function saveMemories() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(memories));
+    const storedMemories = memories.map(({ isUploading, uploadError, localMediaUrl, ...memory }) => memory);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(storedMemories));
   } catch (error) {
     console.warn("无法保存到本地，图片可能过大", error);
   }
@@ -268,6 +273,9 @@ function cloudRowToMemory(row) {
     tags: Array.isArray(row.tags) ? row.tags : [],
     image: row.image_url,
     imagePath: row.image_path || "",
+    mediaType: row.media_type || (row.video_url ? "video" : "image"),
+    videoUrl: row.video_url || "",
+    videoPath: row.video_path || "",
     source: row.source || "user",
     deletedAt: row.deleted_at || undefined,
   };
@@ -285,6 +293,9 @@ function memoryToCloudRow(memory) {
     tags: memory.tags || [],
     image_url: memory.image,
     image_path: memory.imagePath || null,
+    media_type: memory.mediaType || "image",
+    video_url: memory.videoUrl || null,
+    video_path: memory.videoPath || null,
     source: memory.source || "user",
     deleted_at: memory.deletedAt || null,
     updated_at: new Date().toISOString(),
@@ -307,7 +318,7 @@ function getCloudPublicUrl(path) {
   return `${url}/storage/v1/object/public/${encodeURIComponent(bucket)}/${encodeStoragePath(path)}`;
 }
 
-async function uploadImageToCloud(file, memoryId) {
+async function uploadMediaToCloud(file, memoryId) {
   if (!isCloudEnabled() || !file?.size) return null;
   const { bucket } = getCloudConfig();
   const path = `${memoryId}/${Date.now()}-${safeFileName(file.name)}`;
@@ -320,9 +331,36 @@ async function uploadImageToCloud(file, memoryId) {
     body: file,
   });
   return {
-    image: getCloudPublicUrl(path),
-    imagePath: path,
+    url: getCloudPublicUrl(path),
+    path,
   };
+}
+
+function getFileMediaType(file) {
+  const type = String(file?.type || "").toLowerCase();
+  const name = String(file?.name || "").toLowerCase();
+  if (type.startsWith("video/") || /\.(mp4|mov|m4v|webm|ogg)$/i.test(name)) return "video";
+  return "image";
+}
+
+function isVideoMemory(memory) {
+  return memory?.mediaType === "video" && Boolean(memory.videoUrl);
+}
+
+function renderUploadBadge(memory) {
+  if (memory.uploadError) return '<span class="upload-badge is-error">上传失败</span>';
+  if (memory.isUploading) return '<span class="upload-badge">上传中</span>';
+  return "";
+}
+
+function renderMediaPreview(memory, className = "") {
+  const label = escapeHtml(memory.title);
+  const imageUrl = escapeHtml(memory.image);
+  const badge = renderUploadBadge(memory);
+  if (isVideoMemory(memory)) {
+    return `<span class="media-frame ${className} is-video"><video src="${escapeHtml(memory.videoUrl)}" poster="${imageUrl}" muted playsinline preload="metadata" draggable="false"></video><span class="video-badge" aria-hidden="true">▶</span>${badge}</span>`;
+  }
+  return `<span class="media-frame ${className}"><img src="${imageUrl}" alt="${label}" draggable="false" />${badge}</span>`;
 }
 
 async function fetchCloudMemories() {
@@ -602,7 +640,7 @@ function renderSphereCard(memory, index) {
   const tilt = (index % 5) - 2;
   return `
     <button class="memory-tile" type="button" style="--tilt:${tilt}deg" aria-label="查看${escapeHtml(memory.title)}">
-      <img src="${memory.image}" alt="${escapeHtml(memory.title)}" draggable="false" />
+      ${renderMediaPreview(memory, "tile-media")}
       <span class="tile-title">${escapeHtml(memory.title)}</span>
       <span class="tile-meta">${yearLabels[memory.year]} · ${formatMonth(memory.month)}</span>
     </button>
@@ -614,7 +652,7 @@ function renderMemoryCard(memory, index) {
   return `
     <article class="memory-card" data-memory-id="${memory.id}" style="--tilt:${tilt}deg" tabindex="0" role="button" aria-label="查看${escapeHtml(memory.title)}">
       <button class="delete-memory-button" type="button" data-action="delete" data-memory-id="${memory.id}" aria-label="删除${escapeHtml(memory.title)}" title="移到回收箱">×</button>
-      <img src="${memory.image}" alt="${escapeHtml(memory.title)}" draggable="false" />
+      ${renderMediaPreview(memory, "card-media")}
       <span class="card-body">
         <h3>${escapeHtml(memory.title)}</h3>
         <p class="card-meta">${escapeHtml(memory.date || "未填写日期")} · ${escapeHtml(memory.place || "未填写地点")}</p>
@@ -632,7 +670,7 @@ function renderTrashCard(memory, index) {
   const tilt = ((index % 5) - 2) * 0.45;
   return `
     <article class="memory-card trash-card" data-memory-id="${memory.id}" style="--tilt:${tilt}deg">
-      <img src="${memory.image}" alt="${escapeHtml(memory.title)}" draggable="false" />
+      ${renderMediaPreview(memory, "card-media")}
       <span class="card-body">
         <h3>${escapeHtml(memory.title)}</h3>
         <p class="card-meta">已放入回收箱 · ${escapeHtml(memory.deletedAt || "")}</p>
@@ -648,7 +686,20 @@ function renderTrashCard(memory, index) {
 function renderPurePhoto(memory, index) {
   return `
     <button class="pure-photo-tile" type="button" data-memory-id="${memory.id}" aria-label="查看${escapeHtml(memory.title)}" style="--delay:${index % 12}">
-      <img src="${memory.image}" alt="${escapeHtml(memory.title)}" draggable="false" />
+      ${renderMediaPreview(memory, "pure-media")}
+    </button>
+  `;
+}
+
+function renderDetailMedia(memory) {
+  if (isVideoMemory(memory)) {
+    return `
+      <video class="detail-video" src="${escapeHtml(memory.videoUrl)}" poster="${escapeHtml(memory.image)}" controls playsinline preload="metadata"></video>
+    `;
+  }
+  return `
+    <button class="detail-image-button" type="button" data-view-image="${memory.id}" aria-label="全屏查看${escapeHtml(memory.title)}">
+      <img src="${escapeHtml(memory.image)}" alt="${escapeHtml(memory.title)}" />
     </button>
   `;
 }
@@ -1030,7 +1081,7 @@ function initFallbackSphere() {
     item.className = "memory-tile";
     item.type = "button";
     item.style.setProperty("--tilt", `${(index % 5) - 2}deg`);
-    item.innerHTML = `<img src="${memory.image}" alt="${escapeHtml(memory.title)}" /><span class="tile-title">${escapeHtml(memory.title)}</span>`;
+    item.innerHTML = `${renderMediaPreview(memory, "tile-media")}<span class="tile-title">${escapeHtml(memory.title)}</span>`;
     item.addEventListener("click", () => openDetail(memory, item));
     fallback.appendChild(item);
   });
@@ -1229,9 +1280,7 @@ function openDetail(memory, sourceElement = null) {
   detailOpen = true;
   detailCard.innerHTML = `
     <div class="detail-media">
-      <button class="detail-image-button" type="button" data-view-image="${memory.id}" aria-label="全屏查看${escapeHtml(memory.title)}">
-        <img src="${memory.image}" alt="${escapeHtml(memory.title)}" />
-      </button>
+      ${renderDetailMedia(memory)}
     </div>
     <div class="detail-content">
       <h2>${escapeHtml(memory.title)}</h2>
@@ -1333,6 +1382,98 @@ function closeDetail() {
   };
 }
 
+
+function getAddDraft() {
+  try {
+    return JSON.parse(localStorage.getItem(ADD_DRAFT_KEY) || "null");
+  } catch (error) {
+    return null;
+  }
+}
+
+function hasAddDraft(draft) {
+  if (!draft) return false;
+  return Boolean(
+    draft.title ||
+      draft.date ||
+      draft.place ||
+      draft.feeling ||
+      draft.fileName ||
+      (Array.isArray(draft.tags) && draft.tags.length),
+  );
+}
+
+function getCurrentAddDraft() {
+  const previous = getAddDraft();
+  const file = addDraftMediaFile || addForm.photoFile?.files?.[0] || null;
+  return {
+    year: addForm.photoYear.value || currentScreen.year || "freshman",
+    month: Number(addForm.photoMonth.value || currentScreen.month || 9),
+    title: addForm.photoTitle.value || "",
+    date: addForm.photoDate.value || "",
+    place: addForm.photoPlace.value || "",
+    feeling: addForm.photoFeeling.value || "",
+    tags: Array.from(selectedFormTags),
+    fileName: file?.name || previous?.fileName || "",
+    fileSize: file?.size || previous?.fileSize || 0,
+    fileType: file?.type || previous?.fileType || "",
+    updatedAt: Date.now(),
+  };
+}
+
+function saveAddDraft() {
+  if (editingMemoryId || isRestoringAddDraft) return;
+  const draft = getCurrentAddDraft();
+  if (hasAddDraft(draft)) {
+    localStorage.setItem(ADD_DRAFT_KEY, JSON.stringify(draft));
+  } else {
+    localStorage.removeItem(ADD_DRAFT_KEY);
+  }
+  updateDraftMediaNote();
+}
+
+function clearAddDraft() {
+  addDraftMediaFile = null;
+  localStorage.removeItem(ADD_DRAFT_KEY);
+  updateDraftMediaNote();
+}
+
+function updateDraftMediaNote() {
+  if (!draftMediaNote) return;
+  const draft = getAddDraft();
+  const file = addDraftMediaFile;
+  if (file) {
+    draftMediaNote.textContent = `已暂存：${file.name}`;
+    return;
+  }
+  if (draft?.fileName) {
+    draftMediaNote.textContent = `之前选择过：${draft.fileName}。刷新页面后需要重新选择文件。`;
+    return;
+  }
+  draftMediaNote.textContent = "";
+}
+
+function restoreAddDraft(defaults) {
+  const draft = getAddDraft();
+  isRestoringAddDraft = true;
+  addForm.photoYear.value = draft?.year || defaults.year;
+  addForm.photoMonth.value = String(draft?.month || defaults.month);
+  addForm.photoTitle.value = draft?.title || "";
+  addForm.photoDate.value = draft?.date || "";
+  addForm.photoPlace.value = draft?.place || "";
+  addForm.photoFeeling.value = draft?.feeling || "";
+  selectedFormTags = new Set(Array.isArray(draft?.tags) ? draft.tags : []);
+  isRestoringAddDraft = false;
+  updateDraftMediaNote();
+  return hasAddDraft(draft);
+}
+
+function handleDraftFileChange() {
+  const file = addForm.photoFile?.files?.[0] || null;
+  if (!editingMemoryId) addDraftMediaFile = file;
+  saveAddDraft();
+}
+
 function openAddModal(memoryId = null) {
   editingMemoryId = memoryId;
   const editing = memoryId ? memories.find((memory) => memory.id === memoryId) : null;
@@ -1345,13 +1486,20 @@ function openAddModal(memoryId = null) {
   photoFormTitle.textContent = editing ? "修改这段记忆" : "把一段新记忆放进来";
   const year = editing?.year || currentScreen.year || "freshman";
   const month = editing?.month || currentScreen.month || 9;
-  addForm.photoYear.value = year;
-  addForm.photoMonth.value = String(month);
-  addForm.photoTitle.value = editing?.title || "";
-  addForm.photoDate.value = editing?.date || "";
-  addForm.photoPlace.value = editing?.place || "";
-  addForm.photoFeeling.value = editing?.feeling || "";
-  selectedFormTags = new Set(editing?.tags || []);
+  if (editing) {
+    addForm.photoYear.value = year;
+    addForm.photoMonth.value = String(month);
+    addForm.photoTitle.value = editing.title || "";
+    addForm.photoDate.value = editing.date || "";
+    addForm.photoPlace.value = editing.place || "";
+    addForm.photoFeeling.value = editing.feeling || "";
+    selectedFormTags = new Set(editing.tags || []);
+    if (draftMediaNote) {
+      draftMediaNote.textContent = `${isVideoMemory(editing) ? "当前已保存视频" : "当前已保存照片"}会继续保留；重新选择文件才会替换。`;
+    }
+  } else {
+    restoreAddDraft({ year, month });
+  }
   newTagInput.value = "";
   renderTagEditor();
   addForm.photoTitle.focus();
@@ -1504,6 +1652,7 @@ function addTagFromInput() {
   selectedFormTags.add(tag);
   newTagInput.value = "";
   renderTagEditor();
+  saveAddDraft();
 }
 
 function getSelectedFormTags() {
@@ -1827,6 +1976,61 @@ function readFileAsDataUrl(file) {
   });
 }
 
+
+function revokeLocalMediaUrl(memory) {
+  if (memory?.localMediaUrl?.startsWith("blob:")) {
+    URL.revokeObjectURL(memory.localMediaUrl);
+  }
+  memory.localMediaUrl = "";
+}
+
+function refreshAfterMemoryUpload(year, month) {
+  initSphere();
+  if (currentScreen.type === "month") showMonth(currentScreen.year, currentScreen.month, activeFilter);
+  else if (currentScreen.type === "pure") showPurePhotos();
+  else if (currentScreen.type === "year") showYear(currentScreen.year);
+  else if (currentScreen.type === "main") showMain();
+  else showMonth(year, month);
+}
+
+async function uploadMemoryMediaInBackground(memoryId, file, year, month) {
+  const memory = memories.find((item) => item.id === memoryId);
+  if (!memory || !file?.size) return;
+
+  try {
+    const mediaType = getFileMediaType(file);
+    const uploaded = await uploadMediaToCloud(file, memoryId);
+    if (!uploaded?.url) throw new Error("媒体上传失败。");
+
+    if (mediaType === "video") {
+      Object.assign(memory, {
+        mediaType: "video",
+        videoUrl: uploaded.url,
+        videoPath: uploaded.path,
+      });
+    } else {
+      Object.assign(memory, {
+        mediaType: "image",
+        image: uploaded.url,
+        imagePath: uploaded.path,
+        videoUrl: "",
+        videoPath: "",
+      });
+    }
+
+    memory.isUploading = false;
+    memory.uploadError = "";
+    revokeLocalMediaUrl(memory);
+    await persistMemory(memory);
+  } catch (error) {
+    console.warn("后台上传失败", error);
+    memory.isUploading = false;
+    memory.uploadError = "请重新编辑上传";
+  }
+
+  refreshAfterMemoryUpload(year, month);
+}
+
 function setPhotoSubmitPending(isPending, label = "") {
   photoSubmitPending = isPending;
   photoSubmitButton.disabled = isPending;
@@ -1855,26 +2059,41 @@ async function handleAddSubmit(event) {
   const year = String(formData.get("photoYear") || "freshman");
   const month = Number(formData.get("photoMonth") || 9);
   const tags = Array.from(getSelectedFormTags()).map((tag) => tag.trim()).filter(Boolean);
-  const file = formData.get("photoFile");
+  const formFile = formData.get("photoFile");
+  const file = editing ? formFile : addDraftMediaFile || formFile;
+  if (!editing && getAddDraft()?.fileName && !(file && file.size)) {
+    window.alert("之前选择的文件在刷新页面后无法自动恢复，请重新选择文件后再保存。");
+    setPhotoSubmitPending(false);
+    return;
+  }
+
   const memoryId = editing?.id || `user-${Date.now()}`;
   let image = editing?.image || makeSampleImage(title, memories.length + 1);
   let imagePath = editing?.imagePath || "";
+  let mediaType = editing?.mediaType || "image";
+  let videoUrl = editing?.videoUrl || "";
+  let videoPath = editing?.videoPath || "";
+  let localMediaUrl = "";
+  let shouldUploadInBackground = false;
+
+  if (file && file.size) {
+    mediaType = getFileMediaType(file);
+    localMediaUrl = URL.createObjectURL(file);
+    shouldUploadInBackground = true;
+    if (mediaType === "video") {
+      videoUrl = localMediaUrl;
+      videoPath = "";
+      if (!editing?.image) image = makeSampleImage(title, memories.length + 1);
+      imagePath = editing?.imagePath || "";
+    } else {
+      image = localMediaUrl;
+      imagePath = "";
+      videoUrl = "";
+      videoPath = "";
+    }
+  }
 
   try {
-    if (file && file.size) {
-      const uploaded = await uploadImageToCloud(file, memoryId).catch((error) => {
-        console.warn("云端图片上传失败，改用本地临时图片", error);
-        return null;
-      });
-      if (uploaded) {
-        image = uploaded.image;
-        imagePath = uploaded.imagePath;
-      } else {
-        image = await readFileAsDataUrl(file);
-        imagePath = "";
-      }
-    }
-
     if (editing) {
       Object.assign(editing, {
         year,
@@ -1886,8 +2105,14 @@ async function handleAddSubmit(event) {
         tags: tags.length ? tags : ["新记忆"],
         image,
         imagePath,
+        mediaType,
+        videoUrl,
+        videoPath,
+        localMediaUrl,
+        isUploading: shouldUploadInBackground,
+        uploadError: "",
       });
-      await persistMemory(editing);
+      if (!shouldUploadInBackground) await persistMemory(editing);
     } else {
       const memory = {
         id: memoryId,
@@ -1900,20 +2125,29 @@ async function handleAddSubmit(event) {
         tags: tags.length ? tags : ["新记忆"],
         image,
         imagePath,
+        mediaType,
+        videoUrl,
+        videoPath,
+        localMediaUrl,
+        isUploading: shouldUploadInBackground,
+        uploadError: "",
         source: "user",
       };
       memories = [memory, ...memories];
-      await persistMemory(memory);
+      if (!shouldUploadInBackground) await persistMemory(memory);
     }
 
-    saveMemories();
+    if (!editing) clearAddDraft();
     closeAddModal();
     closeDetail();
     initSphere();
     showMonth(year, month);
+    if (shouldUploadInBackground) uploadMemoryMediaInBackground(memoryId, file, year, month);
   } catch (error) {
     console.warn("保存照片失败", error);
     window.alert("保存失败，请稍后再试。");
+    const memory = memories.find((item) => item.id === memoryId);
+    revokeLocalMediaUrl(memory);
     setPhotoSubmitPending(false);
   }
 }
@@ -1989,10 +2223,12 @@ addModal.addEventListener("click", (event) => {
     if (tagTarget.dataset.tagAction === "select") {
       selectedFormTags.add(oldTag);
       renderTagEditor();
+      saveAddDraft();
     }
     if (tagTarget.dataset.tagAction === "unselect") {
       selectedFormTags.delete(oldTag);
       renderTagEditor();
+      saveAddDraft();
     }
     if (tagTarget.dataset.tagAction === "rename") {
       const input = tagTarget.parentElement.querySelector("input");
@@ -2003,6 +2239,9 @@ addModal.addEventListener("click", (event) => {
 });
 addTagButton.addEventListener("click", addTagFromInput);
 newTagInput.addEventListener("input", renderTagEditor);
+addForm.addEventListener("input", saveAddDraft);
+addForm.addEventListener("change", saveAddDraft);
+addForm.photoFile.addEventListener("change", handleDraftFileChange);
 newTagInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();

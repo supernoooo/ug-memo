@@ -59,8 +59,9 @@
         </div>
 
         <label class="field field-file">
-          <span>照片</span>
-          <input id="photoFile" name="photoFile" type="file" accept="image/*" />
+          <span>照片或视频</span>
+          <input id="photoFile" name="photoFile" type="file" accept="image/*,video/mp4,video/webm,video/quicktime,video/*" />
+          <p class="draft-media-note" id="draftMediaNote"></p>
         </label>
 
         <label class="field">
@@ -154,7 +155,7 @@
 
     <div class="admin-welcome" id="adminWelcome" aria-hidden="true">
       <section class="admin-welcome-card" role="status" aria-live="polite">
-        <p class="panel-kicker">Welcome back</p>
+        <p class="panel-kicker">你今天吃了吗</p>
         <h2 id="adminWelcomeTitle">管理员已登录</h2>
         <p id="adminWelcomeCopy">本次权限将在 30 分钟后过期。</p>
       </section>

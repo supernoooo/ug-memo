@@ -13,11 +13,18 @@ create table if not exists public.memories (
   tags text[] not null default '{}',
   image_url text not null,
   image_path text,
+  media_type text not null default 'image',
+  video_url text,
+  video_path text,
   source text not null default 'user',
   deleted_at text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.memories add column if not exists media_type text not null default 'image';
+alter table public.memories add column if not exists video_url text;
+alter table public.memories add column if not exists video_path text;
 
 alter table public.memories enable row level security;
 
