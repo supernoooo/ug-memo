@@ -262,7 +262,7 @@ button {
   background:
     radial-gradient(circle at 50% 58%, rgba(255, 255, 255, 0.09), transparent 24rem),
     linear-gradient(rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0.88)),
-    url("assets/首页背景.jpg") center / cover no-repeat,
+    url("assets/background.jpg") center / cover no-repeat,
     #000;
   transition: opacity 0.6s ease;
 }
@@ -821,7 +821,8 @@ button.memory-tile {
 
 .nav-junior {
   --tilt: 1.1deg;
-  background: #fffdf3;
+  color: #fffdf3;
+  background: #5b2b8f;
 }
 
 .nav-senior {
