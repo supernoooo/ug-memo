@@ -10,8 +10,8 @@
   --muted: rgba(17, 17, 17, 0.68);
   --radius: 8px;
   --gap: 22px;
-  --cursor-home: url("ref_style/cursor-wand.svg") 10 8, auto;
-  --cursor-page: url("ref_style/cursor-watermelon.svg") 10 8, auto;
+  --cursor-home: url("assets/cursor-wand.svg") 10 8, auto;
+  --cursor-page: url("assets/cursor-watermelon.svg") 10 8, auto;
   --cursor-active: var(--cursor-home);
 }
 
@@ -262,7 +262,7 @@ button {
   background:
     radial-gradient(circle at 50% 58%, rgba(255, 255, 255, 0.09), transparent 24rem),
     linear-gradient(rgba(0, 0, 0, 0.72), rgba(0, 0, 0, 0.88)),
-    url("ref_style/首页背景.jpg") center / cover no-repeat,
+    url("assets/首页背景.jpg") center / cover no-repeat,
     #000;
   transition: opacity 0.6s ease;
 }

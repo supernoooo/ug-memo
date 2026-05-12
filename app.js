@@ -861,7 +861,7 @@ function updateRaycastHover() {
   sphere.raycaster.setFromCamera(sphere.pointer, sphere.camera);
   const hits = sphere.raycaster.intersectObjects(sphere.items.filter((mesh) => mesh.visible), false);
   sphere.hovered = hits[0]?.object || null;
-  sphereStage.style.cursor = 'url("ref_style/cursor-wand.svg") 10 8, auto';
+  sphereStage.style.cursor = 'url("assets/cursor-wand.svg") 10 8, auto';
 }
 
 function projectMeshToScreen(mesh) {
