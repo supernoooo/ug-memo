@@ -15,6 +15,12 @@ const yearIntros = {
 };
 
 const monthOrder = [9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8];
+const PROJECT_BGM_PLAYLIST = "./music/playlist.json";
+const PROJECT_BGM_FILES = [];
+const BGM_VOLUME = 0.18;
+const ADMIN_CONFIG_PATH = "./admin.json";
+const ADMIN_SESSION_KEY = "college-memory-admin-session";
+const ADMIN_SESSION_MS = 30 * 60 * 1000;
 
 const samplePalette = [
   ["#ffd400", "#ff3d86", "#111111"],
@@ -75,6 +81,18 @@ const deleteMessage = document.querySelector("#deleteMessage");
 const confirmDeleteButton = document.querySelector("#confirmDeleteButton");
 const imageViewer = document.querySelector("#imageViewer");
 const viewerImage = document.querySelector("#viewerImage");
+const musicToggleButton = document.querySelector("#musicToggleButton");
+const musicStatus = document.querySelector("#musicStatus");
+const musicStatusText = document.querySelector("#musicStatusText");
+const bgmPlayer = document.querySelector("#bgmPlayer");
+const adminModal = document.querySelector("#adminModal");
+const adminForm = document.querySelector("#adminForm");
+const adminUsername = document.querySelector("#adminUsername");
+const adminPassword = document.querySelector("#adminPassword");
+const adminError = document.querySelector("#adminError");
+const adminWelcome = document.querySelector("#adminWelcome");
+const adminWelcomeTitle = document.querySelector("#adminWelcomeTitle");
+const adminWelcomeCopy = document.querySelector("#adminWelcomeCopy");
 
 let memories = loadMemories();
 let currentScreen = { type: "home" };
@@ -86,6 +104,13 @@ let editingMemoryId = null;
 let pendingTagDelete = null;
 let selectedFormTags = new Set();
 let viewerScale = 1;
+let bgmTracks = [];
+let bgmTrackIndex = 0;
+let bgmNeedsGesture = false;
+let adminAccountsPromise = null;
+let pendingAdminAction = null;
+let adminWelcomeTimer = 0;
+let lastTrailTime = 0;
 
 const sphere = {
   scene: null,
@@ -191,6 +216,130 @@ function saveMemories() {
   }
 }
 
+function normalizeAdminAccounts(config) {
+  const list = Array.isArray(config)
+    ? config
+    : config?.admins || config?.accounts || config?.users || (config?.username && config?.password ? [config] : []);
+  return list
+    .map((account) => ({
+      username: String(account?.username || account?.user || "").trim(),
+      password: String(account?.password || account?.pass || ""),
+    }))
+    .filter((account) => account.username && account.password);
+}
+
+async function loadAdminAccounts() {
+  if (!adminAccountsPromise) {
+    adminAccountsPromise = fetch(ADMIN_CONFIG_PATH, { cache: "no-store" })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then(normalizeAdminAccounts)
+      .catch((error) => {
+        console.warn("无法读取管理员账号配置", error);
+        return [];
+      });
+  }
+  return adminAccountsPromise;
+}
+
+function getAdminSession() {
+  try {
+    return JSON.parse(localStorage.getItem(ADMIN_SESSION_KEY) || "null");
+  } catch (error) {
+    return null;
+  }
+}
+
+function isAdminSessionValid() {
+  const session = getAdminSession();
+  if (session?.expiresAt && Number(session.expiresAt) > Date.now()) return true;
+  localStorage.removeItem(ADMIN_SESSION_KEY);
+  return false;
+}
+
+function saveAdminSession(username) {
+  localStorage.setItem(
+    ADMIN_SESSION_KEY,
+    JSON.stringify({
+      username,
+      expiresAt: Date.now() + ADMIN_SESSION_MS,
+    }),
+  );
+}
+
+function showAdminWelcome(username) {
+  window.clearTimeout(adminWelcomeTimer);
+  adminWelcomeTitle.textContent = `欢迎回来，${username}`;
+  adminWelcomeCopy.textContent = "管理员权限已开启，30 分钟内无需再次登录。";
+  adminWelcome.classList.remove("is-leaving");
+  adminWelcome.classList.add("is-active");
+  adminWelcome.setAttribute("aria-hidden", "false");
+  adminWelcomeTimer = window.setTimeout(() => {
+    adminWelcome.classList.add("is-leaving");
+    adminWelcomeTimer = window.setTimeout(() => {
+      adminWelcome.classList.remove("is-active", "is-leaving");
+      adminWelcome.setAttribute("aria-hidden", "true");
+    }, 280);
+  }, 1800);
+}
+
+function openAdminModal(action) {
+  pendingAdminAction = action;
+  adminError.textContent = "";
+  adminForm.reset();
+  adminModal.classList.add("is-active");
+  adminModal.setAttribute("aria-hidden", "false");
+  document.body.style.overflow = "hidden";
+  requestAnimationFrame(() => adminUsername.focus());
+}
+
+function closeAdminModal() {
+  pendingAdminAction = null;
+  adminError.textContent = "";
+  adminModal.classList.remove("is-active");
+  adminModal.setAttribute("aria-hidden", "true");
+  if (
+    !detailOpen &&
+    !addModal.classList.contains("is-active") &&
+    !deleteModal.classList.contains("is-active") &&
+    !imageViewer.classList.contains("is-active")
+  ) {
+    document.body.style.overflow = "";
+  }
+}
+
+function requireAdmin(action) {
+  if (isAdminSessionValid()) {
+    action();
+    return;
+  }
+  openAdminModal(action);
+}
+
+async function handleAdminSubmit(event) {
+  event.preventDefault();
+  adminError.textContent = "";
+  const username = adminUsername.value.trim();
+  const password = adminPassword.value;
+  const accounts = await loadAdminAccounts();
+  const matched = accounts.some((account) => account.username === username && account.password === password);
+
+  if (!matched) {
+    adminError.textContent = accounts.length ? "账号或密码不正确。" : "没有读取到可用管理员账号。";
+    adminPassword.value = "";
+    adminPassword.focus();
+    return;
+  }
+
+  const action = pendingAdminAction;
+  saveAdminSession(username);
+  closeAdminModal();
+  showAdminWelcome(username);
+  if (action) action();
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -220,6 +369,21 @@ function getTagsFor(list) {
   const tags = new Set();
   list.forEach((memory) => memory.tags.forEach((tag) => tags.add(tag)));
   return ["全部", ...Array.from(tags)];
+}
+
+function getTopTag(list) {
+  const counts = new Map();
+  list.forEach((memory) => {
+    (memory.tags || []).forEach((tag) => {
+      if (!tag) return;
+      counts.set(tag, (counts.get(tag) || 0) + 1);
+    });
+  });
+  const [topTag] = Array.from(counts.entries()).sort((left, right) => {
+    if (right[1] !== left[1]) return right[1] - left[1];
+    return left[0].localeCompare(right[0], "zh-CN");
+  })[0] || [];
+  return topTag || "等待新记忆";
 }
 
 function getAllTags() {
@@ -503,7 +667,7 @@ function updateRaycastHover() {
   sphere.raycaster.setFromCamera(sphere.pointer, sphere.camera);
   const hits = sphere.raycaster.intersectObjects(sphere.items.filter((mesh) => mesh.visible), false);
   sphere.hovered = hits[0]?.object || null;
-  sphereStage.style.cursor = sphere.hovered ? "pointer" : "grab";
+  sphereStage.style.cursor = 'url("ref_style/cursor-wand.svg") 10 8, auto';
 }
 
 function projectMeshToScreen(mesh) {
@@ -683,6 +847,8 @@ function setView(view) {
   const isHome = view === "home";
   homeView.classList.toggle("is-active", isHome);
   pageView.classList.toggle("is-active", !isHome);
+  document.body.classList.toggle("is-home", isHome);
+  document.body.classList.toggle("is-page", !isHome);
 }
 
 function showHome() {
@@ -702,9 +868,9 @@ function showMain() {
     <div class="page-inner">
       <section class="hero-panel">
         <div class="top-badge">已收录 ${activeCount} 段大学记忆</div>
-        <h1>大学四年生活纪念场</h1>
+        <h1>本诺诺的本科生活</h1>
         <p class="hero-copy">
-          把合照、晚风、作业、旅行和告别，全部收进这座明亮的记忆发射场。
+          欢迎来到我的时光胶囊机🥰~
         </p>
         <div class="sub-actions">
           <button class="plain-button" type="button" data-action="home">返回首页</button>
@@ -712,17 +878,17 @@ function showMain() {
         </div>
       </section>
       <section class="year-grid" aria-label="年级入口">
-        ${renderYearButton("freshman", "刚认识世界，也刚认识自己", "nav-freshman")}
+        ${renderYearButton("freshman", "每一天的自己和前一天都不一样", "nav-freshman")}
         ${renderYearButton("sophomore", "熟门熟路地制造很多日常", "nav-sophomore")}
-        ${renderYearButton("junior", "项目、远行和成长挤在一起", "nav-junior")}
-        ${renderYearButton("senior", "离开之前，把校园再看一遍", "nav-senior")}
+        ${renderYearButton("junior", "项目、远行和成长挤在一起好忙碌", "nav-junior")}
+        ${renderYearButton("senior", "还没有离开校园就已经开始怀念", "nav-senior")}
         <button class="nav-card nav-random" type="button" data-action="random">
           <strong>随机记忆抽取</strong>
-          <span>让今天自己遇见一张过去的照片</span>
+          <span>抽到哪一个我？</span>
         </button>
         <button class="nav-card nav-pure" type="button" data-action="pure">
           <strong>照片纯享</strong>
-          <span>把所有照片排成一面干净的墙</span>
+          <span>一次性看够所有照片！</span>
         </button>
       </section>
     </div>
@@ -745,12 +911,12 @@ function showYear(year) {
   const months = monthOrder
     .map((month, index) => {
       const list = getMonthMemories(year, month);
-      const firstTag = list[0]?.tags?.[0] || "等待新记忆";
+      const topTag = getTopTag(list);
       return `
         <button class="month-card ${list.length ? "has-items" : ""}" type="button" data-action="month" data-year="${year}" data-month="${month}" style="--tilt:${((index % 5) - 2) * 0.7}deg">
           <span class="month-number">${month}</span>
           <span class="month-count">${list.length} 张照片</span>
-          <span class="month-note">${escapeHtml(firstTag)}</span>
+          <span class="month-note">${escapeHtml(topTag)}</span>
         </button>
       `;
     })
@@ -895,10 +1061,11 @@ function openDetail(memory, sourceElement = null) {
   if (!sourceElement) {
     detailCard.animate(
       [
-        { transform: "translateY(28px) scale(0.94)", opacity: 0 },
-        { transform: "translateY(0) scale(1)", opacity: 1 },
+        { transform: "translateY(34px) rotate(-2deg) scale(0.9)", filter: "blur(6px)", opacity: 0 },
+        { transform: "translateY(-4px) rotate(0.5deg) scale(1.015)", filter: "blur(0)", opacity: 1, offset: 0.78 },
+        { transform: "translateY(0) rotate(0deg) scale(1)", filter: "blur(0)", opacity: 1 },
       ],
-      { duration: 300, easing: "cubic-bezier(.18,.8,.24,1)", fill: "both" },
+      { duration: 520, easing: "cubic-bezier(.16,1,.3,1)", fill: "both" },
     );
     return;
   }
@@ -910,11 +1077,13 @@ function openDetail(memory, sourceElement = null) {
       [
         {
           transform: `translate(${from.left - to.left}px, ${from.top - to.top}px) scale(${from.width / to.width}, ${from.height / to.height})`,
+          filter: "blur(3px)",
           opacity: 0.92,
         },
-        { transform: "translate(0, 0) scale(1)", opacity: 1 },
+        { transform: "translate(0, -5px) scale(1.018)", filter: "blur(0)", opacity: 1, offset: 0.82 },
+        { transform: "translate(0, 0) scale(1)", filter: "blur(0)", opacity: 1 },
       ],
-      { duration: 360, easing: "cubic-bezier(.18,.8,.24,1)", fill: "both" },
+      { duration: 560, easing: "cubic-bezier(.16,1,.3,1)", fill: "both" },
     );
   });
 }
@@ -940,10 +1109,10 @@ function closeDetail() {
   if (!lastDetailSource || !document.body.contains(lastDetailSource)) {
     const animation = detailCard.animate(
       [
-        { transform: "translateY(0) scale(1)", opacity: 1 },
-        { transform: "translateY(18px) scale(0.96)", opacity: 0 },
+        { transform: "translateY(0) rotate(0deg) scale(1)", filter: "blur(0)", opacity: 1 },
+        { transform: "translateY(22px) rotate(1.2deg) scale(0.94)", filter: "blur(5px)", opacity: 0 },
       ],
-      { duration: 220, easing: "ease", fill: "forwards" },
+      { duration: 280, easing: "cubic-bezier(.4,0,.2,1)", fill: "forwards" },
     );
     animation.onfinish = finish;
     return;
@@ -952,17 +1121,22 @@ function closeDetail() {
   const from = detailCard.getBoundingClientRect();
   const to = lastDetailSource.getBoundingClientRect();
   detailCard.style.transformOrigin = "top left";
+  lastDetailSource.classList?.add("is-detail-returning");
   const animation = detailCard.animate(
     [
-      { transform: "translate(0, 0) scale(1)", opacity: 1 },
+      { transform: "translate(0, 0) scale(1)", filter: "blur(0)", opacity: 1 },
       {
         transform: `translate(${to.left - from.left}px, ${to.top - from.top}px) scale(${to.width / from.width}, ${to.height / from.height})`,
+        filter: "blur(2px)",
         opacity: 0.18,
       },
     ],
-    { duration: 360, easing: "cubic-bezier(.22,.9,.22,1)", fill: "forwards" },
+    { duration: 460, easing: "cubic-bezier(.22,1,.36,1)", fill: "forwards" },
   );
-  animation.onfinish = finish;
+  animation.onfinish = () => {
+    lastDetailSource?.classList?.remove("is-detail-returning");
+    finish();
+  };
 }
 
 function openAddModal(memoryId = null) {
@@ -994,7 +1168,12 @@ function closeAddModal() {
   selectedFormTags = new Set();
   addModal.classList.remove("is-active");
   addModal.setAttribute("aria-hidden", "true");
-  if (!detailOpen && !deleteModal.classList.contains("is-active") && !imageViewer.classList.contains("is-active")) {
+  if (
+    !detailOpen &&
+    !deleteModal.classList.contains("is-active") &&
+    !imageViewer.classList.contains("is-active") &&
+    !adminModal.classList.contains("is-active")
+  ) {
     document.body.style.overflow = "";
   }
 }
@@ -1019,12 +1198,21 @@ function closeDeleteModal() {
   confirmDeleteButton.textContent = "移到回收箱";
   deleteModal.classList.remove("is-active");
   deleteModal.setAttribute("aria-hidden", "true");
-  if (!detailOpen && !addModal.classList.contains("is-active") && !imageViewer.classList.contains("is-active")) {
+  if (
+    !detailOpen &&
+    !addModal.classList.contains("is-active") &&
+    !imageViewer.classList.contains("is-active") &&
+    !adminModal.classList.contains("is-active")
+  ) {
     document.body.style.overflow = "";
   }
 }
 
 function confirmDeleteMemory() {
+  if (!isAdminSessionValid()) {
+    requireAdmin(confirmDeleteMemory);
+    return;
+  }
   if (pendingTagDelete) {
     deleteTag(pendingTagDelete);
     return;
@@ -1044,6 +1232,10 @@ function confirmDeleteMemory() {
 }
 
 function restoreMemory(memoryId) {
+  if (!isAdminSessionValid()) {
+    requireAdmin(() => restoreMemory(memoryId));
+    return;
+  }
   const memory = memories.find((item) => item.id === memoryId);
   if (!memory) return;
   delete memory.deletedAt;
@@ -1053,6 +1245,10 @@ function restoreMemory(memoryId) {
 }
 
 function purgeMemory(memoryId) {
+  if (!isAdminSessionValid()) {
+    requireAdmin(() => purgeMemory(memoryId));
+    return;
+  }
   memories = memories.filter((memory) => memory.id !== memoryId);
   saveMemories();
   initSphere();
@@ -1118,6 +1314,10 @@ function getSelectedFormTags() {
 }
 
 function renameTag(oldTag, newTag) {
+  if (!isAdminSessionValid()) {
+    requireAdmin(() => renameTag(oldTag, newTag));
+    return;
+  }
   const next = newTag.trim();
   if (!oldTag || !next || oldTag === next) return;
   memories.forEach((memory) => {
@@ -1135,6 +1335,10 @@ function renameTag(oldTag, newTag) {
 }
 
 function openDeleteTagModal(tag) {
+  if (!isAdminSessionValid()) {
+    requireAdmin(() => openDeleteTagModal(tag));
+    return;
+  }
   pendingTagDelete = tag;
   pendingDeleteId = null;
   deleteMessage.textContent = `删除 tag「${tag}」后，所有已上传照片里的这个 tag 都会被移除。`;
@@ -1194,6 +1398,184 @@ function handleViewerWheel(event) {
   viewerImage.style.transform = `scale(${viewerScale})`;
 }
 
+function setMusicStatus(text) {
+  musicStatusText.textContent = text;
+  musicStatus.title = text;
+  requestAnimationFrame(updateMusicMarquee);
+}
+
+function updateMusicMarquee() {
+  const overflow = musicStatusText.scrollWidth - musicStatus.clientWidth;
+  musicStatus.classList.toggle("is-marquee", overflow > 6);
+  musicStatus.style.setProperty("--music-scroll-distance", `${Math.max(0, overflow + 18)}px`);
+  musicStatus.style.setProperty("--music-scroll-duration", `${Math.min(18, Math.max(7, overflow / 18))}s`);
+}
+
+function getTrackName(url) {
+  const file = String(url || "").split("/").pop() || "Unknown track";
+  try {
+    return decodeURIComponent(file).replace(/\.[^.]+$/, "");
+  } catch (error) {
+    return file.replace(/\.[^.]+$/, "");
+  }
+}
+
+function normalizeBgmEntry(entry) {
+  const url = typeof entry === "string" ? entry : entry?.url || entry?.src || "";
+  if (!url) return null;
+  return {
+    name: typeof entry === "object" && entry.name ? entry.name : getTrackName(url),
+    url,
+  };
+}
+
+function setBgmTracks(tracks) {
+  bgmTracks = tracks
+    .map(normalizeBgmEntry)
+    .filter(Boolean)
+    .sort((a, b) => a.name.localeCompare(b.name, "zh-CN", { numeric: true }));
+  bgmTrackIndex = 0;
+  bgmPlayer.pause();
+  bgmPlayer.removeAttribute("src");
+  musicToggleButton.disabled = !bgmTracks.length;
+
+  if (!bgmTracks.length) {
+    setMusicStatus("BGM waiting");
+    return;
+  }
+
+  playBgmTrack(0);
+}
+
+async function loadProjectBgm() {
+  setMusicStatus("BGM loading");
+  let tracks = PROJECT_BGM_FILES;
+
+  try {
+    const response = await fetch(PROJECT_BGM_PLAYLIST, { cache: "no-store" });
+    if (response.ok) {
+      const playlist = await response.json();
+      if (Array.isArray(playlist)) {
+        tracks = playlist.map((entry) => {
+          if (typeof entry === "string" && !entry.includes("/")) return `music/${entry}`;
+          if (entry && typeof entry === "object" && entry.url && !entry.url.includes("/")) {
+            return { ...entry, url: `music/${entry.url}` };
+          }
+          return entry;
+        });
+      }
+    }
+  } catch (error) {
+    console.warn("无法读取项目 BGM playlist", error);
+  }
+
+  setBgmTracks(tracks);
+}
+
+function playBgmTrack(index) {
+  if (!bgmTracks.length) return;
+  bgmTrackIndex = (index + bgmTracks.length) % bgmTracks.length;
+  const track = bgmTracks[bgmTrackIndex];
+  bgmPlayer.volume = BGM_VOLUME;
+  bgmPlayer.src = track.url;
+  bgmPlayer.loop = bgmTracks.length === 1;
+  bgmPlayer.autoplay = true;
+  setMusicStatus(track.name);
+  musicToggleButton.textContent = "Ⅱ";
+  bgmPlayer.play().catch(() => {
+    bgmNeedsGesture = true;
+    musicToggleButton.textContent = "♪";
+    setMusicStatus(track.name);
+  });
+}
+
+function toggleBgm() {
+  if (!bgmTracks.length) return;
+  bgmPlayer.volume = BGM_VOLUME;
+  if (bgmPlayer.paused) {
+    bgmPlayer.play().then(() => {
+      bgmNeedsGesture = false;
+      musicToggleButton.textContent = "Ⅱ";
+    }).catch(() => {
+      bgmNeedsGesture = true;
+    });
+  } else {
+    bgmPlayer.pause();
+    musicToggleButton.textContent = "♪";
+  }
+}
+
+function playNextBgmTrack() {
+  if (bgmTracks.length <= 1) return;
+  playBgmTrack(bgmTrackIndex + 1);
+}
+
+function unlockBgmAfterGesture() {
+  if (!bgmNeedsGesture || !bgmTracks.length || !bgmPlayer.paused) return;
+  bgmPlayer.volume = BGM_VOLUME;
+  bgmPlayer.play().then(() => {
+    bgmNeedsGesture = false;
+    musicToggleButton.textContent = "Ⅱ";
+  }).catch(() => {
+    bgmNeedsGesture = true;
+  });
+}
+
+function createCometTrail(event) {
+  if (currentScreen.type !== "home" || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const now = performance.now();
+  if (now - lastTrailTime < 28) return;
+  lastTrailTime = now;
+  const count = Math.random() > 0.55 ? 2 : 1;
+
+  for (let index = 0; index < count; index += 1) {
+    const comet = document.createElement("span");
+    const angle = -25 + Math.random() * 50;
+    comet.className = "cursor-comet";
+    comet.style.left = `${event.clientX + 5 + Math.random() * 10}px`;
+    comet.style.top = `${event.clientY - 10 + Math.random() * 12}px`;
+    comet.style.setProperty("--comet-rotate", `${angle}deg`);
+    comet.style.setProperty("--comet-size", `${7 + Math.random() * 7}px`);
+    comet.style.setProperty("--comet-life", `${760 + Math.random() * 520}ms`);
+    comet.style.setProperty("--comet-drift-x", `${-12 + Math.random() * 24}px`);
+    comet.style.setProperty("--comet-drift-y", `${8 + Math.random() * 18}px`);
+    document.body.appendChild(comet);
+    window.setTimeout(() => comet.remove(), 1400);
+  }
+}
+
+function createPointerBurst(event) {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const burst = document.createElement("span");
+  burst.className = "click-burst";
+  burst.style.left = `${event.clientX}px`;
+  burst.style.top = `${event.clientY}px`;
+  const isHome = currentScreen.type === "home";
+  const count = isHome ? 24 : 18;
+
+  for (let index = 0; index < count; index += 1) {
+    const particle = document.createElement("span");
+    const angle = (Math.PI * 2 * index) / count + Math.random() * 0.4;
+    const distance = (isHome ? 22 : 18) + Math.random() * (isHome ? 68 : 54);
+    particle.className = isHome ? "click-meteor" : "click-star-yellow";
+    if (isHome) {
+      particle.style.setProperty("--meteor-x", `${Math.cos(angle) * distance}px`);
+      particle.style.setProperty("--meteor-y", `${Math.sin(angle) * distance}px`);
+      particle.style.setProperty("--meteor-size", `${7 + Math.random() * 9}px`);
+      particle.style.setProperty("--meteor-rotate", `${(angle * 180) / Math.PI}deg`);
+    } else {
+      particle.style.setProperty("--star-x", `${Math.cos(angle) * distance}px`);
+      particle.style.setProperty("--star-y", `${Math.sin(angle) * distance}px`);
+      particle.style.setProperty("--star-size", `${10 + Math.random() * 11}px`);
+      particle.style.setProperty("--star-rotate", `${-120 + Math.random() * 240}deg`);
+    }
+    burst.appendChild(particle);
+  }
+
+  document.body.appendChild(burst);
+  window.setTimeout(() => burst.remove(), isHome ? 980 : 820);
+}
+
 function populateMonthSelect() {
   photoMonthSelect.innerHTML = monthOrder
     .map((month) => `<option value="${month}">${formatMonth(month)}</option>`)
@@ -1211,6 +1593,10 @@ function readFileAsDataUrl(file) {
 
 async function handleAddSubmit(event) {
   event.preventDefault();
+  if (!isAdminSessionValid()) {
+    requireAdmin(() => addForm.requestSubmit());
+    return;
+  }
   const formData = new FormData(addForm);
   const title = String(formData.get("photoTitle") || "").trim();
   if (!title) return;
@@ -1271,10 +1657,10 @@ function handlePageClick(event) {
     if (action === "year") showYear(actionTarget.dataset.year);
     if (action === "month") showMonth(actionTarget.dataset.year, Number(actionTarget.dataset.month));
     if (action === "filter") showMonth(currentScreen.year, currentScreen.month, actionTarget.dataset.tag);
-    if (action === "add") openAddModal();
-    if (action === "delete") openDeleteModal(actionTarget.dataset.memoryId);
-    if (action === "restore") restoreMemory(actionTarget.dataset.memoryId);
-    if (action === "purge") purgeMemory(actionTarget.dataset.memoryId);
+    if (action === "add") requireAdmin(() => openAddModal());
+    if (action === "delete") requireAdmin(() => openDeleteModal(actionTarget.dataset.memoryId));
+    if (action === "restore") requireAdmin(() => restoreMemory(actionTarget.dataset.memoryId));
+    if (action === "purge") requireAdmin(() => purgeMemory(actionTarget.dataset.memoryId));
     if (action === "random") {
       const active = getActiveMemories();
       const memory = active[Math.floor(Math.random() * active.length)];
@@ -1316,7 +1702,7 @@ pageView.addEventListener("click", handlePageClick);
 detailModal.addEventListener("click", (event) => {
   if (event.target.matches("[data-close-detail]")) closeDetail();
   const editTarget = event.target.closest("[data-detail-action='edit']");
-  if (editTarget) openAddModal(editTarget.dataset.memoryId);
+  if (editTarget) requireAdmin(() => openAddModal(editTarget.dataset.memoryId));
   const imageTarget = event.target.closest("[data-view-image]");
   if (imageTarget) {
     const memory = memories.find((item) => item.id === imageTarget.dataset.viewImage);
@@ -1354,21 +1740,34 @@ newTagInput.addEventListener("keydown", (event) => {
 deleteModal.addEventListener("click", (event) => {
   if (event.target.matches("[data-close-delete]")) closeDeleteModal();
 });
+adminModal.addEventListener("click", (event) => {
+  if (event.target.matches("[data-close-admin]")) closeAdminModal();
+});
 confirmDeleteButton.addEventListener("click", confirmDeleteMemory);
 imageViewer.addEventListener("click", (event) => {
   if (event.target.matches("[data-close-viewer]")) closeImageViewer();
 });
 imageViewer.addEventListener("wheel", handleViewerWheel, { passive: false });
 addForm.addEventListener("submit", handleAddSubmit);
+adminForm.addEventListener("submit", handleAdminSubmit);
 addForm.photoDate.addEventListener("change", handleDateChange);
+musicToggleButton.addEventListener("click", toggleBgm);
+bgmPlayer.addEventListener("ended", playNextBgmTrack);
+document.addEventListener("pointermove", createCometTrail);
+window.addEventListener("pointerdown", createPointerBurst, { capture: true, passive: true });
+document.addEventListener("pointerdown", unlockBgmAfterGesture);
+window.addEventListener("resize", updateMusicMarquee);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     closeDetail();
     closeAddModal();
     closeDeleteModal();
     closeImageViewer();
+    closeAdminModal();
   }
 });
 
 populateMonthSelect();
 initSphere();
+bgmPlayer.volume = BGM_VOLUME;
+loadProjectBgm();
