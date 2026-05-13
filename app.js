@@ -1,4 +1,5 @@
 const STORAGE_KEY = "college-memory-demo-v1";
+const CLOUD_CACHE_KEY_PREFIX = "college-memory-cloud-cache-v1";
 
 const yearLabels = {
   freshman: "大一",
@@ -22,6 +23,8 @@ const ADMIN_SESSION_KEY = "college-memory-admin-session";
 const ADMIN_SESSION_MS = 30 * 60 * 1000;
 const ADD_DRAFT_KEY = "college-memory-add-draft-v1";
 const CLOUD_CONFIG = window.MEMORY_CLOUD_CONFIG || {};
+const MAX_UPLOAD_IMAGE_EDGE = 2200;
+const IMAGE_UPLOAD_QUALITY = 0.86;
 
 const samplePalette = [
   ["#ffd400", "#ff3d86", "#111111"],
@@ -108,6 +111,7 @@ let pendingTagDelete = null;
 let selectedFormTags = new Set();
 let photoSubmitPending = false;
 let addDraftMediaFile = null;
+const pendingUploadFiles = new Map();
 let isRestoringAddDraft = false;
 let viewerScale = 1;
 let bgmTracks = [];
@@ -203,6 +207,11 @@ function makeFeeling(title, year, month) {
 
 function loadMemories() {
   try {
+    const cloudRaw = isCloudEnabled() ? localStorage.getItem(getCloudCacheKey()) : "";
+    if (cloudRaw) {
+      const parsed = JSON.parse(cloudRaw);
+      if (Array.isArray(parsed)) return parsed;
+    }
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
@@ -216,11 +225,22 @@ function loadMemories() {
 
 function saveMemories() {
   try {
-    const storedMemories = memories.map(({ isUploading, uploadError, localMediaUrl, ...memory }) => memory);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(storedMemories));
+    const storedMemories = memories
+      .filter((memory) => !memory.isUploading && !memory.uploadError && !isTemporaryMediaUrl(memory.image) && !isTemporaryMediaUrl(memory.videoUrl))
+      .map(({ isUploading, uploadError, localMediaUrl, ...memory }) => memory);
+    localStorage.setItem(isCloudEnabled() ? getCloudCacheKey() : STORAGE_KEY, JSON.stringify(storedMemories));
   } catch (error) {
     console.warn("无法保存到本地，图片可能过大", error);
   }
+}
+
+function getCloudCacheKey() {
+  const { url, table } = getCloudConfig();
+  return `${CLOUD_CACHE_KEY_PREFIX}:${url}:${table}`;
+}
+
+function isTemporaryMediaUrl(value) {
+  return /^(blob:|data:)/i.test(String(value || ""));
 }
 
 function getCloudConfig() {
@@ -255,10 +275,20 @@ async function cloudFetch(path, options = {}) {
   const response = await fetch(`${url}${path}`, options);
   if (!response.ok) {
     const message = await response.text().catch(() => "");
-    throw new Error(message || `Cloud request failed: ${response.status}`);
+    throw new Error(message || `Cloud request failed: ${response.status} ${response.statusText}`);
   }
   if (response.status === 204) return null;
   return response.json().catch(() => null);
+}
+
+function getErrorText(error) {
+  const message = String(error?.message || error || "未知错误");
+  try {
+    const parsed = JSON.parse(message);
+    return parsed.message || parsed.error_description || parsed.error || message;
+  } catch {
+    return message;
+  }
 }
 
 function cloudRowToMemory(row) {
@@ -309,6 +339,71 @@ function safeFileName(name) {
     .replace(/^-+|-+$/g, "") || "photo";
 }
 
+function getUploadContentType(file) {
+  const type = String(file?.type || "").toLowerCase();
+  const name = String(file?.name || "").toLowerCase();
+  if (/\.(jpe?g)$/i.test(name)) return "image/jpeg";
+  if (/\.png$/i.test(name)) return "image/png";
+  if (/\.webp$/i.test(name)) return "image/webp";
+  if (/\.gif$/i.test(name)) return "image/gif";
+  if (/\.mp4$/i.test(name)) return "video/mp4";
+  if (/\.webm$/i.test(name)) return "video/webm";
+  if (/\.(mov|qt)$/i.test(name)) return "video/quicktime";
+  return type || "application/octet-stream";
+}
+
+function getCompressedFileName(name) {
+  const safe = safeFileName(name || "photo.jpg");
+  return safe.replace(/\.[^.]+$/, "") + ".jpg";
+}
+
+function shouldCompressImage(file) {
+  const type = String(file?.type || "").toLowerCase();
+  const name = String(file?.name || "").toLowerCase();
+  if (!file?.size || type === "image/gif" || /\.gif$/i.test(name)) return false;
+  return type.startsWith("image/") || /\.(heic|heif|jpe?g|png|webp)$/i.test(name);
+}
+
+function loadImageFromFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("浏览器无法读取这张图片，请确认它是真正的 JPG/PNG/WebP。"));
+    };
+    image.src = url;
+  });
+}
+
+async function prepareFileForUpload(file) {
+  if (!shouldCompressImage(file)) return file;
+  const image = await loadImageFromFile(file).catch(() => null);
+  if (!image?.naturalWidth || !image?.naturalHeight) return file;
+
+  const scale = Math.min(1, MAX_UPLOAD_IMAGE_EDGE / Math.max(image.naturalWidth, image.naturalHeight));
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  if (scale === 1 && file.size < 1.2 * 1024 * 1024 && getUploadContentType(file) === "image/jpeg") return file;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0, width, height);
+
+  const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", IMAGE_UPLOAD_QUALITY));
+  if (!blob || blob.size >= file.size) return file;
+  return new File([blob], getCompressedFileName(file.name), {
+    type: "image/jpeg",
+    lastModified: Date.now(),
+  });
+}
+
 function encodeStoragePath(path) {
   return String(path).split("/").map(encodeURIComponent).join("/");
 }
@@ -325,7 +420,7 @@ async function uploadMediaToCloud(file, memoryId) {
   await cloudFetch(`/storage/v1/object/${encodeURIComponent(bucket)}/${encodeStoragePath(path)}`, {
     method: "POST",
     headers: cloudHeaders({
-      "content-type": file.type || "application/octet-stream",
+      "content-type": getUploadContentType(file),
       "x-upsert": "true",
     }),
     body: file,
@@ -348,7 +443,7 @@ function isVideoMemory(memory) {
 }
 
 function renderUploadBadge(memory) {
-  if (memory.uploadError) return '<span class="upload-badge is-error">上传失败</span>';
+  if (memory.uploadError) return `<span class="upload-badge is-error" title="${escapeHtml(memory.uploadError)}">上传失败</span>`;
   if (memory.isUploading) return '<span class="upload-badge">上传中</span>';
   return "";
 }
@@ -360,7 +455,7 @@ function renderMediaPreview(memory, className = "") {
   if (isVideoMemory(memory)) {
     return `<span class="media-frame ${className} is-video"><video src="${escapeHtml(memory.videoUrl)}" poster="${imageUrl}" muted playsinline preload="metadata" draggable="false"></video><span class="video-badge" aria-hidden="true">▶</span>${badge}</span>`;
   }
-  return `<span class="media-frame ${className}"><img src="${imageUrl}" alt="${label}" draggable="false" />${badge}</span>`;
+  return `<span class="media-frame ${className}"><img src="${imageUrl}" alt="${label}" draggable="false" onerror="this.closest('.media-frame')?.classList.add('is-broken')" />${badge}<span class="media-error">图片无法显示</span></span>`;
 }
 
 async function fetchCloudMemories() {
@@ -375,6 +470,11 @@ async function fetchCloudMemories() {
 async function persistMemory(memory) {
   saveMemories();
   if (!isCloudEnabled() || memory.source === "sample") return;
+  await syncMemoryToCloud(memory).catch((error) => console.warn("无法同步照片到云端", error));
+}
+
+async function syncMemoryToCloud(memory) {
+  if (!isCloudEnabled() || memory.source === "sample") return;
   const { table } = getCloudConfig();
   await cloudFetch(`/rest/v1/${encodeURIComponent(table)}?on_conflict=id`, {
     method: "POST",
@@ -383,7 +483,7 @@ async function persistMemory(memory) {
       Prefer: "resolution=merge-duplicates,return=minimal",
     }),
     body: JSON.stringify(memoryToCloudRow(memory)),
-  }).catch((error) => console.warn("无法同步照片到云端", error));
+  });
 }
 
 async function removeMemoryFromCloud(memory) {
@@ -399,7 +499,7 @@ async function initializeCloudMemories() {
   if (!isCloudEnabled()) return;
   try {
     const cloudMemories = await fetchCloudMemories();
-    if (cloudMemories?.length) {
+    if (Array.isArray(cloudMemories)) {
       memories = cloudMemories;
       saveMemories();
       initSphere();
@@ -1262,11 +1362,15 @@ function showMonth(year, month, filter = "全部") {
           .join("")}
       </nav>
       ${
-        visible.length
-          ? `<section class="photo-grid" aria-label="照片模块列表">${cards}</section>`
-          : `<section class="empty-state"><h2>这个筛选下还没有照片</h2><p>可以点右下角的加号，把新的记忆放进这个月份。</p></section>`
+        `<div class="photo-grid-shell">
+          ${
+            visible.length
+              ? `<section class="photo-grid" aria-label="照片模块列表">${cards}</section>`
+              : `<section class="empty-state"><h2>这个筛选下还没有照片</h2><p>可以点右侧加号，把新的记忆放进这个月份。</p></section>`
+          }
+          <button class="fab-add" type="button" data-action="add" aria-label="新增照片模块" title="新增照片模块">+</button>
+        </div>`
       }
-      <button class="fab-add" type="button" data-action="add" aria-label="新增照片模块" title="新增照片模块">+</button>
     </div>
   `;
 }
@@ -1335,7 +1439,13 @@ function openDetail(memory, sourceElement = null) {
       </p>
       ${renderTagPills(memory.tags)}
       <p class="detail-feeling">${escapeHtml(memory.feeling || "还没有写下感想。")}</p>
+      ${memory.uploadError ? `<p class="detail-upload-error">${escapeHtml(memory.uploadError)}</p>` : ""}
       <div class="detail-actions">
+        ${
+          memory.uploadError && pendingUploadFiles.has(memory.id)
+            ? `<button class="small-button" type="button" data-detail-action="retry-upload" data-memory-id="${memory.id}">重新上传</button>`
+            : ""
+        }
         <button class="small-button detail-edit-button" type="button" data-detail-action="edit" data-memory-id="${memory.id}">编辑</button>
       </div>
       <p class="detail-hint">点击暗色区域回到原来的位置</p>
@@ -1540,7 +1650,7 @@ function openAddModal(memoryId = null) {
     addForm.photoFeeling.value = editing.feeling || "";
     selectedFormTags = new Set(editing.tags || []);
     if (draftMediaNote) {
-      draftMediaNote.textContent = `${isVideoMemory(editing) ? "当前已保存视频" : "当前已保存照片"}会继续保留；重新选择文件才会替换。`;
+      draftMediaNote.textContent = `看到没有文件名显示不要担心o(*￣▽￣*)ブ。之前上传的${isVideoMemory(editing) ? "视频" : "照片"}会继续保留，重新选择文件才会替换。`;
     }
   } else {
     restoreAddDraft({ year, month });
@@ -2038,13 +2148,29 @@ function refreshAfterMemoryUpload(year, month) {
   else showMonth(year, month);
 }
 
+function updateMemoryMediaDom(memory) {
+  if (!memory) return;
+  pageView.querySelectorAll("[data-memory-id]").forEach((element) => {
+    if (element.dataset.memoryId !== memory.id) return;
+    const media = element.querySelector(".media-frame");
+    if (media) media.outerHTML = renderMediaPreview(memory, media.classList.contains("pure-media") ? "pure-media" : "card-media");
+  });
+}
+
 async function uploadMemoryMediaInBackground(memoryId, file, year, month) {
   const memory = memories.find((item) => item.id === memoryId);
   if (!memory || !file?.size) return;
 
   try {
-    const mediaType = getFileMediaType(file);
-    const uploaded = await uploadMediaToCloud(file, memoryId);
+    memory.isUploading = true;
+    memory.uploadError = "";
+    updateMemoryMediaDom(memory);
+
+    if (!isAdminSessionValid()) throw new Error("管理员登录已过期，请重新登录后再上传。");
+
+    const uploadFile = await prepareFileForUpload(file);
+    const mediaType = getFileMediaType(uploadFile);
+    const uploaded = await uploadMediaToCloud(uploadFile, memoryId);
     if (!uploaded?.url) throw new Error("媒体上传失败。");
 
     if (mediaType === "video") {
@@ -2063,17 +2189,23 @@ async function uploadMemoryMediaInBackground(memoryId, file, year, month) {
       });
     }
 
+    await syncMemoryToCloud(memory);
     memory.isUploading = false;
     memory.uploadError = "";
+    pendingUploadFiles.delete(memoryId);
     revokeLocalMediaUrl(memory);
-    await persistMemory(memory);
+    saveMemories();
   } catch (error) {
     console.warn("后台上传失败", error);
     memory.isUploading = false;
-    memory.uploadError = "请重新编辑上传";
+    memory.uploadError = `请重新上传：${getErrorText(error)}`;
   }
 
-  refreshAfterMemoryUpload(year, month);
+  updateMemoryMediaDom(memory);
+  if (detailOpen) {
+    const updatedMemory = memories.find((item) => item.id === memoryId);
+    if (updatedMemory) openDetail(updatedMemory);
+  }
 }
 
 function setPhotoSubmitPending(isPending, label = "") {
@@ -2125,6 +2257,7 @@ async function handleAddSubmit(event) {
     mediaType = getFileMediaType(file);
     localMediaUrl = URL.createObjectURL(file);
     shouldUploadInBackground = true;
+    pendingUploadFiles.set(memoryId, file);
     if (mediaType === "video") {
       videoUrl = localMediaUrl;
       videoPath = "";
@@ -2192,6 +2325,7 @@ async function handleAddSubmit(event) {
     console.warn("保存照片失败", error);
     window.alert("保存失败，请稍后再试。");
     const memory = memories.find((item) => item.id === memoryId);
+    pendingUploadFiles.delete(memoryId);
     revokeLocalMediaUrl(memory);
     setPhotoSubmitPending(false);
   }
@@ -2254,6 +2388,24 @@ detailModal.addEventListener("click", (event) => {
   if (event.target.matches("[data-close-detail]")) closeDetail();
   const editTarget = event.target.closest("[data-detail-action='edit']");
   if (editTarget) requireAdmin(() => openAddModal(editTarget.dataset.memoryId));
+  const retryTarget = event.target.closest("[data-detail-action='retry-upload']");
+  if (retryTarget) {
+    const memory = memories.find((item) => item.id === retryTarget.dataset.memoryId);
+    const file = pendingUploadFiles.get(retryTarget.dataset.memoryId);
+    if (memory) {
+      if (!file) {
+        memory.uploadError = "原始文件已丢失，请点“编辑”重新选择照片。";
+        openDetail(memory);
+        updateMemoryMediaDom(memory);
+        return;
+      }
+      memory.isUploading = true;
+      memory.uploadError = "";
+      updateMemoryMediaDom(memory);
+      openDetail(memory);
+      uploadMemoryMediaInBackground(memory.id, file, memory.year, memory.month);
+    }
+  }
   const imageTarget = event.target.closest("[data-view-image]");
   if (imageTarget) {
     const memory = memories.find((item) => item.id === imageTarget.dataset.viewImage);
