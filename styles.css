@@ -511,6 +511,29 @@ button.memory-tile {
   pointer-events: none;
 }
 
+.media-error {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  color: #fffdf3;
+  background: repeating-linear-gradient(-45deg, #111 0 12px, #252525 12px 24px);
+  font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  font-size: 14px;
+  font-weight: 900;
+  text-align: center;
+}
+
+.media-frame.is-broken img {
+  opacity: 0;
+}
+
+.media-frame.is-broken .media-error {
+  display: flex;
+}
+
 .tile-media {
   height: 88px;
   border: 3px solid var(--ink);
@@ -1050,7 +1073,7 @@ button.memory-tile {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 28px 44px 56px 28px;
+  padding: 28px 104px 56px 28px;
   scroll-padding: 32px;
   scrollbar-color: rgba(17, 17, 17, 0.7) rgba(255, 253, 243, 0.28);
   scrollbar-width: thin;
@@ -1058,6 +1081,13 @@ button.memory-tile {
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
   gap: clamp(24px, 3.2vh, 34px);
   align-items: start;
+}
+
+.photo-grid-shell {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .pure-heading h1 {
@@ -1351,9 +1381,9 @@ button.memory-tile {
 }
 
 .fab-add {
-  position: fixed;
-  right: 28px;
-  bottom: 28px;
+  position: absolute;
+  right: -120px;
+  top: 80%;
   z-index: 6;
   width: 68px;
   height: 68px;
@@ -1366,13 +1396,14 @@ button.memory-tile {
     0 0 36px rgba(255, 212, 0, 0.74);
   font-size: 38px;
   line-height: 1;
+  transform: translateY(-50%);
   transition:
     transform 150ms ease,
     box-shadow 150ms ease;
 }
 
 .fab-add:hover {
-  transform: translate(-3px, -3px) scale(1.04);
+  transform: translate(-3px, calc(-50% - 3px)) scale(1.04);
   box-shadow:
     11px 11px 0 var(--shadow),
     0 0 52px rgba(255, 212, 0, 0.92);
@@ -1480,6 +1511,19 @@ button.memory-tile {
   font-size: 16px;
   font-weight: 800;
   line-height: 1.8;
+}
+
+.detail-upload-error {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  color: var(--pink);
+  background: rgba(255, 61, 134, 0.08);
+  border: 2px solid rgba(255, 61, 134, 0.34);
+  border-radius: 8px;
+  font-family: "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.6;
 }
 
 .detail-hint {
@@ -1988,7 +2032,7 @@ button.memory-tile {
 
   .photo-grid {
     grid-template-columns: 1fr;
-    padding-inline: 22px;
+    padding-inline: 22px 76px;
   }
 
   .music-dock {
@@ -2202,8 +2246,8 @@ button.memory-tile {
   }
 
   .fab-add {
-    right: 18px;
-    bottom: calc(20px + env(safe-area-inset-bottom));
+    right: 10px;
+    top: 50%;
     width: 58px;
     height: 58px;
     border-width: 4px;
@@ -2211,6 +2255,7 @@ button.memory-tile {
       6px 6px 0 var(--shadow),
       0 0 28px rgba(255, 212, 0, 0.7);
     font-size: 32px;
+    transform: translateY(-50%);
   }
 
   .detail-modal,
