@@ -1090,6 +1090,19 @@ button.memory-tile {
   min-height: 0;
 }
 
+.grid-back-button {
+  position: absolute;
+  right: -145px;
+  top: calc(60% + 63px);
+  z-index: 6;
+  background: var(--yellow);
+  white-space: nowrap;
+}
+
+.month-heading-actions {
+  display: none;
+}
+
 .pure-heading h1 {
   font-family: "Cormorant Garamond", "Noto Serif SC", serif;
 }
@@ -1383,7 +1396,7 @@ button.memory-tile {
 .fab-add {
   position: absolute;
   right: -120px;
-  top: 80%;
+  top: 60%;
   z-index: 6;
   width: 68px;
   height: 68px;
@@ -2035,6 +2048,14 @@ button.memory-tile {
     padding-inline: 22px 76px;
   }
 
+  .month-heading-actions {
+    display: flex;
+  }
+
+  .grid-back-button {
+    display: none;
+  }
+
   .music-dock {
     grid-template-columns: auto auto minmax(0, 180px);
   }
@@ -2246,8 +2267,10 @@ button.memory-tile {
   }
 
   .fab-add {
-    right: 10px;
-    top: 50%;
+    position: fixed;
+    right: max(18px, env(safe-area-inset-right));
+    top: auto;
+    bottom: calc(20px + env(safe-area-inset-bottom));
     width: 58px;
     height: 58px;
     border-width: 4px;
@@ -2255,7 +2278,7 @@ button.memory-tile {
       6px 6px 0 var(--shadow),
       0 0 28px rgba(255, 212, 0, 0.7);
     font-size: 32px;
-    transform: translateY(-50%);
+    transform: none;
   }
 
   .detail-modal,
