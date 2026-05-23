@@ -22,6 +22,7 @@ const BGM_VOLUME = 0.18;
 const ADMIN_SESSION_KEY = "college-memory-admin-session";
 const ADMIN_SESSION_MS = 30 * 60 * 1000;
 const ADD_DRAFT_KEY = "college-memory-add-draft-v1";
+const SCREEN_STATE_KEY = "college-memory-screen-state-v1";
 const CLOUD_CONFIG = window.MEMORY_CLOUD_CONFIG || {};
 const MAX_UPLOAD_IMAGE_EDGE = 2200;
 const IMAGE_UPLOAD_QUALITY = 0.86;
@@ -145,6 +146,36 @@ const sphere = {
   frameId: 0,
   resizeObserver: null,
 };
+
+function saveScreenState() {
+  try {
+    sessionStorage.setItem(SCREEN_STATE_KEY, JSON.stringify({ ...currentScreen, filter: activeFilter }));
+  } catch (error) {
+    console.warn("无法保存当前页面状态", error);
+  }
+}
+
+function getSavedScreenState() {
+  try {
+    return JSON.parse(sessionStorage.getItem(SCREEN_STATE_KEY) || "null");
+  } catch (error) {
+    return null;
+  }
+}
+
+function restoreSavedScreen() {
+  const state = getSavedScreenState();
+  if (!state || state.type === "home") {
+    showHome();
+    return;
+  }
+  if (state.type === "main") showMain();
+  else if (state.type === "year" && state.year) showYear(state.year);
+  else if (state.type === "month" && state.year && state.month) showMonth(state.year, Number(state.month), state.filter || "全部");
+  else if (state.type === "pure") showPurePhotos();
+  else if (state.type === "trash") showTrash();
+  else showHome();
+}
 
 function makeSampleImage(title, index) {
   const colors = samplePalette[index % samplePalette.length];
@@ -402,6 +433,13 @@ async function prepareFileForUpload(file) {
     type: "image/jpeg",
     lastModified: Date.now(),
   });
+}
+
+async function getFileMediaAspect(file) {
+  if (!shouldCompressImage(file)) return null;
+  const image = await loadImageFromFile(file).catch(() => null);
+  if (!image?.naturalWidth || !image?.naturalHeight) return null;
+  return clampMediaAspect(image.naturalWidth / image.naturalHeight);
 }
 
 function encodeStoragePath(path) {
@@ -694,7 +732,15 @@ function getTrashedMemories() {
 }
 
 function getMonthMemories(year, month) {
-  return getActiveMemories().filter((memory) => memory.year === year && Number(memory.month) === Number(month));
+  return getActiveMemories()
+    .filter((memory) => memory.year === year && Number(memory.month) === Number(month))
+    .sort((first, second) => getMemoryDay(first) - getMemoryDay(second));
+}
+
+function getMemoryDay(memory) {
+  const match = String(memory.date || "").match(/^\d{4}-\d{2}-(\d{2})$/);
+  if (!match) return 99;
+  return Number(match[1]) || 99;
 }
 
 function getTagsFor(list) {
@@ -873,7 +919,7 @@ function rebuildSphereMeshes() {
     mesh = new THREE.Mesh(geometry, material);
     const position = new THREE.Vector3(point.x, point.y, point.z).multiplyScalar(2.18);
     mesh.position.copy(position);
-    mesh.lookAt(0, 0, 0);
+    orientSphereMeshToCamera(mesh);
     mesh.userData = {
       memory,
       basePosition: position.clone(),
@@ -884,6 +930,12 @@ function rebuildSphereMeshes() {
     sphere.group.add(mesh);
     return mesh;
   });
+}
+
+function orientSphereMeshToCamera(mesh) {
+  if (!mesh || !sphere.camera) return;
+  mesh.lookAt(sphere.camera.position);
+  mesh.rotateY(Math.PI);
 }
 
 function clampMediaAspect(value) {
@@ -962,6 +1014,7 @@ function makeCardTexture(memory, index, onAspectChange) {
       memory.mediaAspect = nextAspect;
       setCardTextureCanvasSize(canvas, nextAspect);
       onAspectChange?.(nextAspect);
+      saveMemories();
     }
     drawCardTexture(context, memory, index, image);
     texture.needsUpdate = true;
@@ -1041,6 +1094,7 @@ function updateSphereMeshes() {
   sphere.items.forEach((mesh) => {
     mesh.getWorldPosition(worldPosition);
     mesh.visible = true;
+    orientSphereMeshToCamera(mesh);
 
     const depth = Math.max(0, Math.min(1, (worldPosition.z + 2.18) / 4.36));
     const hoverBoost = mesh === sphere.hovered ? 1.34 : 1;
@@ -1243,6 +1297,7 @@ function setView(view) {
 
 function showHome() {
   currentScreen = { type: "home" };
+  saveScreenState();
   homeView.classList.remove("home-exiting", "home-hidden");
   setView("home");
   sphere.exploded = false;
@@ -1251,6 +1306,7 @@ function showHome() {
 
 function showMain() {
   currentScreen = { type: "main" };
+  saveScreenState();
   setView("page");
   const activeCount = getActiveMemories().length;
   const trashCount = getTrashedMemories().length;
@@ -1297,6 +1353,7 @@ function renderYearButton(year, subtitle, className) {
 
 function showYear(year) {
   currentScreen = { type: "year", year };
+  saveScreenState();
   setView("page");
   const months = monthOrder
     .map((month, index) => {
@@ -1332,6 +1389,7 @@ function showYear(year) {
 function showMonth(year, month, filter = "全部") {
   currentScreen = { type: "month", year, month };
   activeFilter = filter;
+  saveScreenState();
   setView("page");
 
   const all = getMonthMemories(year, month);
@@ -1346,7 +1404,7 @@ function showMonth(year, month, filter = "全部") {
         <div class="top-badge">${yearLabels[year]} · ${formatMonth(month)}</div>
         <h1>${formatMonth(month)}记忆盒</h1>
         <p class="page-copy">可以先按 tag 快速筛选，点击照片模块看看吧~~</p>
-        <div class="heading-actions">
+        <div class="heading-actions month-heading-actions">
           <button class="plain-button" type="button" data-action="year" data-year="${year}">返回上一级</button>
         </div>
       </section>
@@ -1369,6 +1427,7 @@ function showMonth(year, month, filter = "全部") {
               : `<section class="empty-state"><h2>这个筛选下还没有照片</h2><p>可以点右侧加号，把新的记忆放进这个月份。</p></section>`
           }
           <button class="fab-add" type="button" data-action="add" aria-label="新增照片模块" title="新增照片模块">+</button>
+          <button class="plain-button grid-back-button" type="button" data-action="year" data-year="${year}">返回上一级</button>
         </div>`
       }
     </div>
@@ -1377,6 +1436,7 @@ function showMonth(year, month, filter = "全部") {
 
 function showTrash() {
   currentScreen = { type: "trash" };
+  saveScreenState();
   setView("page");
   const trashed = getTrashedMemories();
   const cards = trashed.map((memory, index) => renderTrashCard(memory, index)).join("");
@@ -1402,6 +1462,7 @@ function showTrash() {
 
 function showPurePhotos() {
   currentScreen = { type: "pure" };
+  saveScreenState();
   setView("page");
   const active = getActiveMemories();
   const tiles = active.map((memory, index) => renderPurePhoto(memory, index)).join("");
@@ -2168,6 +2229,7 @@ async function uploadMemoryMediaInBackground(memoryId, file, year, month) {
 
     if (!isAdminSessionValid()) throw new Error("管理员登录已过期，请重新登录后再上传。");
 
+    const nextAspect = await getFileMediaAspect(file);
     const uploadFile = await prepareFileForUpload(file);
     const mediaType = getFileMediaType(uploadFile);
     const uploaded = await uploadMediaToCloud(uploadFile, memoryId);
@@ -2184,6 +2246,7 @@ async function uploadMemoryMediaInBackground(memoryId, file, year, month) {
         mediaType: "image",
         image: uploaded.url,
         imagePath: uploaded.path,
+        mediaAspect: nextAspect || memory.mediaAspect,
         videoUrl: "",
         videoPath: "",
       });
@@ -2248,6 +2311,7 @@ async function handleAddSubmit(event) {
   let image = editing?.image || makeSampleImage(title, memories.length + 1);
   let imagePath = editing?.imagePath || "";
   let mediaType = editing?.mediaType || "image";
+  let mediaAspect = editing?.mediaAspect || null;
   let videoUrl = editing?.videoUrl || "";
   let videoPath = editing?.videoPath || "";
   let localMediaUrl = "";
@@ -2255,6 +2319,7 @@ async function handleAddSubmit(event) {
 
   if (file && file.size) {
     mediaType = getFileMediaType(file);
+    const nextAspect = await getFileMediaAspect(file);
     localMediaUrl = URL.createObjectURL(file);
     shouldUploadInBackground = true;
     pendingUploadFiles.set(memoryId, file);
@@ -2266,6 +2331,7 @@ async function handleAddSubmit(event) {
     } else {
       image = localMediaUrl;
       imagePath = "";
+      if (nextAspect) mediaAspect = nextAspect;
       videoUrl = "";
       videoPath = "";
     }
@@ -2284,6 +2350,7 @@ async function handleAddSubmit(event) {
         image,
         imagePath,
         mediaType,
+        mediaAspect,
         videoUrl,
         videoPath,
         localMediaUrl,
@@ -2304,6 +2371,7 @@ async function handleAddSubmit(event) {
         image,
         imagePath,
         mediaType,
+        mediaAspect,
         videoUrl,
         videoPath,
         localMediaUrl,
@@ -2478,7 +2546,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 populateMonthSelect();
-initSphere();
+restoreSavedScreen();
 bgmPlayer.volume = BGM_VOLUME;
 loadProjectBgm();
 initializeCloudMemories();
