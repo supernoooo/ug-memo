@@ -26,6 +26,18 @@ const SCREEN_STATE_KEY = "college-memory-screen-state-v1";
 const CLOUD_CONFIG = window.MEMORY_CLOUD_CONFIG || {};
 const MAX_UPLOAD_IMAGE_EDGE = 2200;
 const IMAGE_UPLOAD_QUALITY = 0.86;
+const SPHERE_MAX_ITEMS = 260;
+const SPHERE_IMAGE_LOAD_CONCURRENCY = 4;
+const SPHERE_THUMBNAIL_WIDTH = 640;
+const SPHERE_THUMBNAIL_QUALITY = 78;
+const SPHERE_IMAGE_LOAD_TIMEOUT_MS = 45000;
+const SPHERE_TEXTURE_CACHE_BUST = "sphere-r2-cors-v2";
+const SPHERE_RADIUS = 2.18;
+const SPHERE_TILE_CURVE_RADIUS = 1.42;
+const SPHERE_TILE_SEGMENTS_X = 12;
+const SPHERE_TILE_SEGMENTS_Y = 10;
+const SPHERE_MAX_TILE_ASPECT = 1.34;
+const SPHERE_MIN_TILE_ASPECT = 0.62;
 
 const samplePalette = [
   ["#ffd400", "#ff3d86", "#111111"],
@@ -67,6 +79,7 @@ const sampleTitles = [
 const homeView = document.querySelector("#homeView");
 const pageView = document.querySelector("#pageView");
 const sphereStage = document.querySelector("#sphereStage");
+const sphereLoading = document.querySelector("#sphereLoading");
 const enterButton = document.querySelector("#enterButton");
 const detailModal = document.querySelector("#detailModal");
 const detailCard = detailModal.querySelector(".detail-card");
@@ -122,6 +135,10 @@ let bgmUserPaused = false;
 let pendingAdminAction = null;
 let adminWelcomeTimer = 0;
 let lastTrailTime = 0;
+let sphereActiveImageLoads = 0;
+const sphereImageLoadQueue = [];
+let addDraftSaveTimer = 0;
+let allTagsCache = null;
 
 const sphere = {
   scene: null,
@@ -145,6 +162,10 @@ const sphere = {
   lastY: 0,
   frameId: 0,
   resizeObserver: null,
+  loadVersion: 0,
+  pendingTextureLoads: 0,
+  signature: "",
+  readyOnce: false,
 };
 
 function saveScreenState() {
@@ -260,6 +281,7 @@ function saveMemories() {
       .filter((memory) => !memory.isUploading && !memory.uploadError && !isTemporaryMediaUrl(memory.image) && !isTemporaryMediaUrl(memory.videoUrl))
       .map(({ isUploading, uploadError, localMediaUrl, ...memory }) => memory);
     localStorage.setItem(isCloudEnabled() ? getCloudCacheKey() : STORAGE_KEY, JSON.stringify(storedMemories));
+    allTagsCache = null;
   } catch (error) {
     console.warn("无法保存到本地，图片可能过大", error);
   }
@@ -306,7 +328,14 @@ async function cloudFetch(path, options = {}) {
   const response = await fetch(`${url}${path}`, options);
   if (!response.ok) {
     const message = await response.text().catch(() => "");
-    throw new Error(message || `Cloud request failed: ${response.status} ${response.statusText}`);
+    let detail = message;
+    try {
+      const parsed = JSON.parse(message);
+      detail = parsed.message || parsed.error_description || parsed.error || message;
+    } catch {
+      detail = message;
+    }
+    throw new Error(`Supabase ${response.status} ${response.statusText} (${path}): ${detail || "request failed"}`);
   }
   if (response.status === 204) return null;
   return response.json().catch(() => null);
@@ -724,7 +753,8 @@ function getMemoryShuffleRank(memory) {
 function getSphereMemories() {
   return getActiveMemories()
     .slice()
-    .sort((first, second) => getMemoryShuffleRank(first) - getMemoryShuffleRank(second));
+    .sort((first, second) => getMemoryShuffleRank(first) - getMemoryShuffleRank(second))
+    .slice(0, SPHERE_MAX_ITEMS);
 }
 
 function getTrashedMemories() {
@@ -765,13 +795,15 @@ function getTopTag(list) {
 }
 
 function getAllTags() {
+  if (allTagsCache) return allTagsCache;
   const tags = new Set();
   memories.forEach((memory) => {
     (memory.tags || []).forEach((tag) => {
       if (tag) tags.add(tag);
     });
   });
-  return Array.from(tags).sort((a, b) => a.localeCompare(b, "zh-CN"));
+  allTagsCache = Array.from(tags).sort((a, b) => a.localeCompare(b, "zh-CN"));
+  return allTagsCache;
 }
 
 function renderTagPills(tags) {
@@ -850,21 +882,71 @@ function renderDetailMedia(memory) {
   `;
 }
 
-function initSphere() {
+function getSphereSignature() {
+  return getSphereMemories()
+    .map((memory) => [
+      memory.id,
+      memory.image,
+      memory.videoUrl,
+      memory.mediaType,
+      memory.mediaAspect,
+      memory.deletedAt || "",
+    ].join("|"))
+    .join("::");
+}
+
+function initSphere({ force = false } = {}) {
   cancelAnimationFrame(sphere.frameId);
   sphere.exploded = false;
   sphere.exploding = false;
   sphere.hovered = null;
 
   if (!window.THREE) {
+    setSphereLoadingState(false);
     initFallbackSphere();
     return;
   }
 
   if (!sphere.renderer) setupThreeSphere();
-  rebuildSphereMeshes();
+  const nextSignature = getSphereSignature();
+  if (!force && sphere.readyOnce && sphere.items.length && sphere.signature === nextSignature) {
+    setSphereLoadingState(false);
+  } else {
+    rebuildSphereMeshes(nextSignature);
+  }
   resizeSphere();
   renderSphere();
+}
+
+function refreshSphereAfterMemoryChange() {
+  if (currentScreen.type === "home") initSphere({ force: true });
+}
+
+function setSphereLoadingState(isLoading) {
+  homeView.classList.toggle("is-sphere-loading", isLoading);
+  homeView.classList.toggle("is-sphere-ready", !isLoading);
+  sphereStage.setAttribute("aria-busy", isLoading ? "true" : "false");
+  if (sphereLoading) sphereLoading.setAttribute("aria-hidden", isLoading ? "false" : "true");
+}
+
+function beginSphereTextureLoading(count) {
+  sphere.loadVersion += 1;
+  sphere.pendingTextureLoads = count;
+  setSphereLoadingState(count > 0 && !sphere.readyOnce);
+  if (!count) {
+    sphere.readyOnce = true;
+    setSphereLoadingState(false);
+  }
+  return sphere.loadVersion;
+}
+
+function markSphereTextureLoaded(version) {
+  if (version !== sphere.loadVersion) return;
+  sphere.pendingTextureLoads = Math.max(0, sphere.pendingTextureLoads - 1);
+  if (sphere.pendingTextureLoads === 0) {
+    sphere.readyOnce = true;
+    setSphereLoadingState(false);
+  }
 }
 
 function setupThreeSphere() {
@@ -890,25 +972,30 @@ function setupThreeSphere() {
   sphere.scene.add(ambient);
 }
 
-function rebuildSphereMeshes() {
+function rebuildSphereMeshes(signature = getSphereSignature()) {
   while (sphere.group.children.length) {
     const child = sphere.group.children.pop();
     child.geometry?.dispose();
-    child.material?.map?.dispose();
+    if (child.material?.map) {
+      child.material.map.userData.isDisposed = true;
+      child.material.map.dispose();
+    }
     child.material?.dispose();
   }
 
   const sphereMemories = getSphereMemories();
   const targetCount = sphereMemories.length;
   const points = fibonacciPoints(targetCount);
+  sphere.signature = signature;
+  const loadVersion = beginSphereTextureLoading(targetCount);
   sphere.items = points.map((point, index) => {
     const memory = sphereMemories[index];
     let mesh = null;
     const texture = makeCardTexture(memory, index, () => {
       if (mesh) resizeSphereMeshToMedia(mesh, targetCount);
-    });
+    }, targetCount, () => markSphereTextureLoaded(loadVersion));
     const size = getSphereTileSize(targetCount, memory);
-    const geometry = new THREE.PlaneGeometry(size.width, size.height);
+    const geometry = createCurvedSphereTileGeometry(size.width, size.height);
     const material = new THREE.MeshBasicMaterial({
       map: texture,
       transparent: true,
@@ -917,9 +1004,9 @@ function rebuildSphereMeshes() {
       depthWrite: false,
     });
     mesh = new THREE.Mesh(geometry, material);
-    const position = new THREE.Vector3(point.x, point.y, point.z).multiplyScalar(2.18);
+    const position = new THREE.Vector3(point.x, point.y, point.z).multiplyScalar(SPHERE_RADIUS);
     mesh.position.copy(position);
-    orientSphereMeshToCamera(mesh);
+    orientSphereMeshToSurface(mesh);
     mesh.userData = {
       memory,
       basePosition: position.clone(),
@@ -932,10 +1019,17 @@ function rebuildSphereMeshes() {
   });
 }
 
-function orientSphereMeshToCamera(mesh) {
-  if (!mesh || !sphere.camera) return;
-  mesh.lookAt(sphere.camera.position);
-  mesh.rotateY(Math.PI);
+function orientSphereMeshToSurface(mesh) {
+  if (!mesh) return;
+  const normal = mesh.position.clone().normalize();
+  if (!Number.isFinite(normal.x) || normal.lengthSq() === 0) normal.set(0, 0, 1);
+  const worldUp = new THREE.Vector3(0, 1, 0);
+  let tangentX = new THREE.Vector3().crossVectors(worldUp, normal);
+  if (tangentX.lengthSq() < 0.0001) tangentX = new THREE.Vector3(1, 0, 0);
+  tangentX.normalize();
+  const tangentY = new THREE.Vector3().crossVectors(normal, tangentX).normalize();
+  const matrix = new THREE.Matrix4().makeBasis(tangentX, tangentY, normal);
+  mesh.quaternion.setFromRotationMatrix(matrix);
 }
 
 function clampMediaAspect(value) {
@@ -948,25 +1042,48 @@ function getMemoryMediaAspect(memory) {
   return clampMediaAspect(memory?.mediaAspect || 300 / 394);
 }
 
+function getSphereMediaAspect(memory) {
+  const aspect = getMemoryMediaAspect(memory);
+  return Math.min(SPHERE_MAX_TILE_ASPECT, Math.max(SPHERE_MIN_TILE_ASPECT, aspect));
+}
+
 function getSphereBaseHeight(count) {
   if (count <= 1) return 1.48;
   if (count <= 6) return 1.04;
-  if (count <= 14) return 0.72;
-  if (count <= 32) return 0.54;
-  if (count <= 80) return 0.42;
-  return 0.35;
+  if (count <= 14) return 0.74;
+  if (count <= 32) return 0.56;
+  if (count <= 80) return 0.43;
+  if (count <= 140) return 0.36;
+  if (count <= 220) return 0.32;
+  return 0.29;
 }
 
 function getSphereTileSize(count, memory) {
   const height = getSphereBaseHeight(count);
-  const aspect = getMemoryMediaAspect(memory);
+  const aspect = getSphereMediaAspect(memory);
   return { width: height * aspect, height };
 }
 
 function resizeSphereMeshToMedia(mesh, count) {
   const size = getSphereTileSize(count, mesh.userData.memory);
   mesh.geometry?.dispose();
-  mesh.geometry = new THREE.PlaneGeometry(size.width, size.height);
+  mesh.geometry = createCurvedSphereTileGeometry(size.width, size.height);
+}
+
+function createCurvedSphereTileGeometry(width, height) {
+  const geometry = new THREE.PlaneGeometry(width, height, SPHERE_TILE_SEGMENTS_X, SPHERE_TILE_SEGMENTS_Y);
+  const positions = geometry.attributes.position;
+  const curveRadius = Math.max(SPHERE_TILE_CURVE_RADIUS, Math.max(width, height) * 1.35);
+  for (let index = 0; index < positions.count; index += 1) {
+    const x = positions.getX(index);
+    const y = positions.getY(index);
+    const distanceSq = x * x + y * y;
+    const sagitta = curveRadius - Math.sqrt(Math.max(0.0001, curveRadius * curveRadius - distanceSq));
+    positions.setZ(index, -sagitta);
+  }
+  positions.needsUpdate = true;
+  geometry.computeVertexNormals();
+  return geometry;
 }
 
 function fibonacciPoints(count) {
@@ -986,9 +1103,56 @@ function fibonacciPoints(count) {
   return points;
 }
 
-function setCardTextureCanvasSize(canvas, aspect) {
+function getSphereTextureLongSide(count) {
+  if (count <= 32) return 394;
+  if (count <= 80) return 320;
+  return 240;
+}
+
+function getSphereImageUrls(memory) {
+  const originalUrl = String(memory?.image || "");
+  const thumbnailUrl = getSphereThumbnailUrl(originalUrl);
+  return Array.from(new Set([thumbnailUrl, originalUrl].filter(Boolean).map(getSphereTextureUrl)));
+}
+
+function getSphereTextureUrl(url) {
+  if (!url || /^(data:|blob:)/i.test(url)) return url;
+  try {
+    const parsed = new URL(url, window.location.href);
+    if (parsed.hostname.endsWith(".r2.dev")) {
+      parsed.searchParams.set("v", SPHERE_TEXTURE_CACHE_BUST);
+    }
+    return parsed.toString();
+  } catch (error) {
+    return url;
+  }
+}
+
+function getSphereThumbnailUrl(url) {
+  if (!url || /^(data:|blob:)/i.test(url)) return url;
+  try {
+    const parsed = new URL(url, window.location.href);
+    if (!parsed.pathname.includes("/storage/v1/object/public/")) return url;
+    parsed.pathname = parsed.pathname.replace("/storage/v1/object/public/", "/storage/v1/render/image/public/");
+    parsed.searchParams.set("width", String(SPHERE_THUMBNAIL_WIDTH));
+    parsed.searchParams.set("quality", String(SPHERE_THUMBNAIL_QUALITY));
+    return parsed.toString();
+  } catch (error) {
+    return url;
+  }
+}
+
+function setImageCrossOrigin(image, url) {
+  if (/^(data:|blob:)/i.test(String(url || ""))) {
+    image.removeAttribute("crossorigin");
+    return;
+  }
+  image.crossOrigin = "anonymous";
+}
+
+function setCardTextureCanvasSize(canvas, aspect, count = 0) {
   const safeAspect = clampMediaAspect(aspect);
-  const longSide = 394;
+  const longSide = getSphereTextureLongSide(count);
   if (safeAspect >= 1) {
     canvas.width = longSide;
     canvas.height = Math.round(longSide / safeAspect);
@@ -998,9 +1162,25 @@ function setCardTextureCanvasSize(canvas, aspect) {
   }
 }
 
-function makeCardTexture(memory, index, onAspectChange) {
+function queueSphereImageLoad(startLoad) {
+  sphereImageLoadQueue.push(startLoad);
+  pumpSphereImageLoadQueue();
+}
+
+function pumpSphereImageLoadQueue() {
+  while (sphereActiveImageLoads < SPHERE_IMAGE_LOAD_CONCURRENCY && sphereImageLoadQueue.length) {
+    const startLoad = sphereImageLoadQueue.shift();
+    sphereActiveImageLoads += 1;
+    startLoad(() => {
+      sphereActiveImageLoads = Math.max(0, sphereActiveImageLoads - 1);
+      pumpSphereImageLoadQueue();
+    });
+  }
+}
+
+function makeCardTexture(memory, index, onAspectChange, targetCount = 0, onLoadComplete = null) {
   const canvas = document.createElement("canvas");
-  setCardTextureCanvasSize(canvas, getMemoryMediaAspect(memory));
+  setCardTextureCanvasSize(canvas, getSphereMediaAspect(memory), targetCount);
   const context = canvas.getContext("2d");
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -1008,21 +1188,71 @@ function makeCardTexture(memory, index, onAspectChange) {
 
   drawCardTexture(context, memory, index);
   const image = new Image();
-  image.onload = () => {
-    const nextAspect = clampMediaAspect(image.naturalWidth / image.naturalHeight);
-    if (Math.abs(nextAspect - getMemoryMediaAspect(memory)) > 0.01) {
-      memory.mediaAspect = nextAspect;
-      setCardTextureCanvasSize(canvas, nextAspect);
-      onAspectChange?.(nextAspect);
-      saveMemories();
+  image.decoding = "async";
+  image.fetchPriority = index < 24 ? "high" : "low";
+  const imageUrls = getSphereImageUrls(memory);
+  queueSphereImageLoad((done) => {
+    let isComplete = false;
+    const finishLoad = () => {
+      if (isComplete) return;
+      isComplete = true;
+      onLoadComplete?.();
+      done();
+    };
+    if (texture.userData.isDisposed) {
+      finishLoad();
+      return;
     }
-    drawCardTexture(context, memory, index, image);
-    texture.needsUpdate = true;
-  };
-  if (!/^(data:|blob:)/i.test(String(memory.image || ""))) {
-    image.crossOrigin = "anonymous";
-  }
-  image.src = memory.image;
+    let imageUrlIndex = 0;
+    let loadTimer = 0;
+    const clearLoadTimer = () => {
+      window.clearTimeout(loadTimer);
+      loadTimer = 0;
+    };
+    const loadNextImageUrl = () => {
+      const nextUrl = imageUrls[imageUrlIndex];
+      if (!nextUrl) {
+        finishLoad();
+        return;
+      }
+      clearLoadTimer();
+      setImageCrossOrigin(image, nextUrl);
+      if (imageUrls.length > 1) {
+        loadTimer = window.setTimeout(() => {
+          imageUrlIndex += 1;
+          loadNextImageUrl();
+        }, SPHERE_IMAGE_LOAD_TIMEOUT_MS);
+      }
+      image.src = nextUrl;
+    };
+    image.onload = () => {
+      if (isComplete) return;
+      clearLoadTimer();
+      if (!texture.userData.isDisposed) {
+        const nextAspect = clampMediaAspect(image.naturalWidth / image.naturalHeight);
+        if (Math.abs(nextAspect - getMemoryMediaAspect(memory)) > 0.01) {
+          memory.mediaAspect = nextAspect;
+          setCardTextureCanvasSize(canvas, getSphereMediaAspect(memory), targetCount);
+          onAspectChange?.(nextAspect);
+          saveMemories();
+        }
+        drawCardTexture(context, memory, index, image);
+        texture.needsUpdate = true;
+      }
+      finishLoad();
+    };
+    image.onerror = () => {
+      if (isComplete) return;
+      clearLoadTimer();
+      imageUrlIndex += 1;
+      if (imageUrlIndex < imageUrls.length) {
+        loadNextImageUrl();
+        return;
+      }
+      finishLoad();
+    };
+    loadNextImageUrl();
+  });
   return texture;
 }
 
@@ -1030,10 +1260,17 @@ function drawCardTexture(context, memory, index, image = null) {
   const width = context.canvas.width;
   const height = context.canvas.height;
   context.clearRect(0, 0, width, height);
+  context.fillStyle = "#050505";
+  context.fillRect(0, 0, width, height);
   if (image) {
-    const ratio = Math.max(width / image.width, height / image.height);
-    const drawWidth = image.width * ratio;
-    const drawHeight = image.height * ratio;
+    const imageWidth = image.naturalWidth || image.width;
+    const imageHeight = image.naturalHeight || image.height;
+    if (!imageWidth || !imageHeight) return;
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    const ratio = Math.max(width / imageWidth, height / imageHeight);
+    const drawWidth = imageWidth * ratio + 1.5;
+    const drawHeight = imageHeight * ratio + 1.5;
     context.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
   } else {
     const gradient = context.createLinearGradient(0, 0, width, height);
@@ -1094,9 +1331,8 @@ function updateSphereMeshes() {
   sphere.items.forEach((mesh) => {
     mesh.getWorldPosition(worldPosition);
     mesh.visible = true;
-    orientSphereMeshToCamera(mesh);
 
-    const depth = Math.max(0, Math.min(1, (worldPosition.z + 2.18) / 4.36));
+    const depth = Math.max(0, Math.min(1, (worldPosition.z + SPHERE_RADIUS) / (SPHERE_RADIUS * 2)));
     const hoverBoost = mesh === sphere.hovered ? 1.34 : 1;
     const edgeDim = 0.32 + depth * 0.68;
     mesh.scale.setScalar((0.76 + depth * 0.34) * hoverBoost);
@@ -1111,7 +1347,7 @@ function updateRaycastHover() {
   sphere.raycaster.setFromCamera(sphere.pointer, sphere.camera);
   const hits = sphere.raycaster.intersectObjects(sphere.items.filter((mesh) => mesh.visible), false);
   sphere.hovered = hits[0]?.object || null;
-  sphereStage.style.cursor = 'url("assets/cursor-wand.svg") 10 8, auto';
+  sphereStage.style.cursor = 'url("assets/cursor-wand.svg") 28 16, auto';
 }
 
 function projectMeshToScreen(mesh) {
@@ -1509,7 +1745,7 @@ function openDetail(memory, sourceElement = null) {
         }
         <button class="small-button detail-edit-button" type="button" data-detail-action="edit" data-memory-id="${memory.id}">编辑</button>
       </div>
-      <p class="detail-hint">点击暗色区域回到原来的位置</p>
+      <p class="detail-hint">点击四周的暗色区域回到原来的位置，点击照片可以放大喔:D~</p>
     </div>
   `;
 
@@ -1638,6 +1874,8 @@ function getCurrentAddDraft() {
 }
 
 function saveAddDraft() {
+  window.clearTimeout(addDraftSaveTimer);
+  addDraftSaveTimer = 0;
   if (editingMemoryId || isRestoringAddDraft) return;
   const draft = getCurrentAddDraft();
   if (hasAddDraft(draft)) {
@@ -1645,7 +1883,13 @@ function saveAddDraft() {
   } else {
     localStorage.removeItem(ADD_DRAFT_KEY);
   }
-  updateDraftMediaNote();
+  updateDraftMediaNote(draft);
+}
+
+function scheduleAddDraftSave() {
+  if (editingMemoryId || isRestoringAddDraft) return;
+  window.clearTimeout(addDraftSaveTimer);
+  addDraftSaveTimer = window.setTimeout(saveAddDraft, 260);
 }
 
 function clearAddDraft() {
@@ -1654,9 +1898,8 @@ function clearAddDraft() {
   updateDraftMediaNote();
 }
 
-function updateDraftMediaNote() {
+function updateDraftMediaNote(draft = getAddDraft()) {
   if (!draftMediaNote) return;
-  const draft = getAddDraft();
   const file = addDraftMediaFile;
   if (file) {
     draftMediaNote.textContent = `已暂存：${file.name}`;
@@ -1785,7 +2028,7 @@ function confirmDeleteMemory() {
   memory.deletedAt = new Date().toLocaleString("zh-CN", { hour12: false });
   persistMemory(memory);
   closeDeleteModal();
-  initSphere();
+  refreshSphereAfterMemoryChange();
   if (currentScreen.type === "month") showMonth(currentScreen.year, currentScreen.month, activeFilter);
   else showMain();
 }
@@ -1799,7 +2042,7 @@ function restoreMemory(memoryId) {
   if (!memory) return;
   delete memory.deletedAt;
   persistMemory(memory);
-  initSphere();
+  refreshSphereAfterMemoryChange();
   showTrash();
 }
 
@@ -1812,7 +2055,7 @@ function purgeMemory(memoryId) {
   memories = memories.filter((item) => item.id !== memoryId);
   saveMemories();
   removeMemoryFromCloud(memory);
-  initSphere();
+  refreshSphereAfterMemoryChange();
   showTrash();
 }
 
@@ -2201,7 +2444,7 @@ function revokeLocalMediaUrl(memory) {
 }
 
 function refreshAfterMemoryUpload(year, month) {
-  initSphere();
+  refreshSphereAfterMemoryChange();
   if (currentScreen.type === "month") showMonth(currentScreen.year, currentScreen.month, activeFilter);
   else if (currentScreen.type === "pure") showPurePhotos();
   else if (currentScreen.type === "year") showYear(currentScreen.year);
@@ -2283,6 +2526,49 @@ function setPhotoSubmitPending(isPending, label = "") {
   photoSubmitButton.textContent = photoSubmitButton.dataset.idleText || "保存记忆";
 }
 
+function findMemoryCardElement(memoryId) {
+  return Array.from(pageView.querySelectorAll(".memory-card[data-memory-id], .pure-photo-tile[data-memory-id]"))
+    .find((element) => element.dataset.memoryId === memoryId) || null;
+}
+
+function captureMemoryScrollAnchor(memoryId) {
+  const element = findMemoryCardElement(memoryId);
+  if (!element) return null;
+  const scroller = element.closest(".photo-grid, .pure-photo-grid");
+  if (scroller) {
+    const elementRect = element.getBoundingClientRect();
+    const scrollerRect = scroller.getBoundingClientRect();
+    return {
+      memoryId,
+      type: "scroller",
+      topOffset: elementRect.top - scrollerRect.top,
+    };
+  }
+  return {
+    memoryId,
+    type: "window",
+    topOffset: element.getBoundingClientRect().top,
+  };
+}
+
+function restoreMemoryScrollAnchor(anchor) {
+  if (!anchor) return;
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const element = findMemoryCardElement(anchor.memoryId);
+      if (!element) return;
+      const scroller = element.closest(".photo-grid, .pure-photo-grid");
+      if (anchor.type === "scroller" && scroller) {
+        const elementRect = element.getBoundingClientRect();
+        const scrollerRect = scroller.getBoundingClientRect();
+        scroller.scrollTop += elementRect.top - scrollerRect.top - anchor.topOffset;
+        return;
+      }
+      window.scrollBy(0, element.getBoundingClientRect().top - anchor.topOffset);
+    });
+  });
+}
+
 async function handleAddSubmit(event) {
   event.preventDefault();
   if (photoSubmitPending) return;
@@ -2298,6 +2584,7 @@ async function handleAddSubmit(event) {
   const editing = editingMemoryId ? memories.find((memory) => memory.id === editingMemoryId) : null;
   const year = String(formData.get("photoYear") || "freshman");
   const month = Number(formData.get("photoMonth") || 9);
+  const scrollAnchor = editing ? captureMemoryScrollAnchor(editing.id) : null;
   const tags = Array.from(getSelectedFormTags()).map((tag) => tag.trim()).filter(Boolean);
   const formFile = formData.get("photoFile");
   const file = editing ? formFile : addDraftMediaFile || formFile;
@@ -2386,8 +2673,9 @@ async function handleAddSubmit(event) {
     if (!editing) clearAddDraft();
     closeAddModal();
     closeDetail();
-    initSphere();
+    refreshSphereAfterMemoryChange();
     showMonth(year, month);
+    restoreMemoryScrollAnchor(scrollAnchor);
     if (shouldUploadInBackground) uploadMemoryMediaInBackground(memoryId, file, year, month);
   } catch (error) {
     console.warn("保存照片失败", error);
@@ -2505,7 +2793,7 @@ addModal.addEventListener("click", (event) => {
 });
 addTagButton.addEventListener("click", addTagFromInput);
 newTagInput.addEventListener("input", renderTagEditor);
-addForm.addEventListener("input", saveAddDraft);
+addForm.addEventListener("input", scheduleAddDraftSave);
 addForm.addEventListener("change", saveAddDraft);
 addForm.photoFile.addEventListener("change", handleDraftFileChange);
 newTagInput.addEventListener("keydown", (event) => {

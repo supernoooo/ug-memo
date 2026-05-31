@@ -10,7 +10,7 @@
   --muted: rgba(17, 17, 17, 0.68);
   --radius: 8px;
   --gap: 22px;
-  --cursor-home: url("assets/cursor-wand.svg") 10 8, auto;
+  --cursor-home: url("assets/cursor-wand.svg") 28 16, auto;
   --cursor-page: url("assets/cursor-watermelon.svg") 10 8, auto;
   --cursor-active: var(--cursor-home);
 }
@@ -343,12 +343,28 @@ button {
   opacity: 0;
 }
 
+.home-view.is-sphere-loading .home-heading,
+.home-view.is-sphere-loading .sphere-stage,
+.home-view.is-sphere-loading .enter-button {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.home-view.is-sphere-ready .sphere-loading {
+  opacity: 0;
+  animation: none;
+  pointer-events: none;
+  transform: translate(-50%, -50%) scale(0.96);
+}
+
 .sphere-stage {
   position: absolute;
   z-index: 2;
   inset: 0;
   touch-action: none;
   user-select: none;
+  opacity: 1;
+  transition: opacity 520ms ease;
 }
 
 .sphere-stage canvas {
@@ -369,6 +385,48 @@ button {
   pointer-events: none;
   background: radial-gradient(ellipse, rgba(0, 0, 0, 0.74), transparent 68%);
   filter: blur(12px);
+}
+
+.sphere-loading {
+  position: absolute;
+  z-index: 8;
+  left: 50%;
+  top: 50%;
+  display: grid;
+  gap: 14px;
+  width: min(640px, calc(100% - 48px));
+  justify-items: center;
+  color: #fffdf3;
+  text-align: center;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  animation: loadingFloat 2.4s ease-in-out infinite;
+  transition:
+    opacity 420ms ease,
+    transform 420ms ease;
+}
+
+.sphere-loading strong {
+  font-family: "Kaushan Script", "Cormorant Garamond", "Noto Serif SC", cursive;
+  font-size: clamp(58px, 9vw, 132px);
+  font-weight: 400;
+  line-height: 0.92;
+  text-shadow:
+    0 0 18px rgba(255, 255, 255, 0.62),
+    0 0 54px rgba(148, 207, 255, 0.46),
+    0 0 104px rgba(135, 114, 255, 0.28);
+}
+
+.sphere-loading span {
+  color: rgba(232, 246, 255, 0.86);
+  font-family: "Cormorant Garamond", "Noto Serif SC", serif;
+  font-size: clamp(17px, 2vw, 29px);
+  font-style: italic;
+  font-weight: 700;
+  line-height: 1.15;
+  text-shadow:
+    0 0 12px rgba(255, 255, 255, 0.46),
+    0 0 34px rgba(118, 204, 255, 0.34);
 }
 
 .fallback-sphere {
@@ -735,6 +793,16 @@ button.memory-tile {
   }
 }
 
+@keyframes loadingFloat {
+  0%,
+  100% {
+    transform: translate(-50%, calc(-50% - 10px));
+  }
+  50% {
+    transform: translate(-50%, calc(-50% + 10px));
+  }
+}
+
 .page-view {
   width: 100%;
   height: 100vh;
@@ -1026,7 +1094,8 @@ button.memory-tile {
 }
 
 .month-card.has-items:nth-child(4n + 4) {
-  background: #fffdf3;
+  color: #fffdf3;
+  background: #3f176f;
 }
 
 .month-number {
