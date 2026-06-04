@@ -1,0 +1,7 @@
+name = "ug-memo"
+compatibility_date = "2026-06-03"
+pages_build_output_dir = "."
+
+[[r2_buckets]]
+binding = "MEMORY_MEDIA_BUCKET"
+bucket_name = "jjn-ug-memo"
