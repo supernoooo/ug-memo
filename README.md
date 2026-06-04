@@ -10,8 +10,8 @@ https://ug-memo.pages.dev/
 *This web is a record of my wonderful four-year undergraduate life.* 😎
 
 
-🎓 I got my Bachelor's degree in **Electrical and Computer Engineering** on May 17, 2026.
+🎓 I got my Bachelor's degree in **Electrical and Computer Engineering** at **The Chinese University of Hong Kong, Shenzhen** (CUHK-Shenzhen) on May 17, 2026.
 
-🤔 I received offers from MComp@NUS & MSECE@CMU
+🤔 I received offers from MComp@NUS & MSECE@CMU.
 
 🎉 Congratulations to myself !!

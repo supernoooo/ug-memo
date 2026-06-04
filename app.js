@@ -31,7 +31,7 @@ const SPHERE_IMAGE_LOAD_CONCURRENCY = 4;
 const SPHERE_THUMBNAIL_WIDTH = 640;
 const SPHERE_THUMBNAIL_QUALITY = 78;
 const SPHERE_IMAGE_LOAD_TIMEOUT_MS = 45000;
-const SPHERE_TEXTURE_CACHE_BUST = "sphere-r2-cors-v2";
+const SPHERE_TEXTURE_CACHE_BUST = "sphere-r2-fetch-v3";
 const SPHERE_RADIUS = 2.18;
 const SPHERE_TILE_CURVE_RADIUS = 1.42;
 const SPHERE_TILE_SEGMENTS_X = 12;
@@ -302,6 +302,8 @@ function getCloudConfig() {
     key: String(CLOUD_CONFIG.publishableKey || CLOUD_CONFIG.anonKey || ""),
     table: String(CLOUD_CONFIG.table || "memories"),
     bucket: String(CLOUD_CONFIG.bucket || "memories"),
+    r2MediaEndpoint: String(CLOUD_CONFIG.r2MediaEndpoint || "/api/r2-media"),
+    r2PublicBaseUrl: String(CLOUD_CONFIG.r2PublicBaseUrl || "").replace(/\/$/, ""),
   };
 }
 
@@ -475,27 +477,83 @@ function encodeStoragePath(path) {
   return String(path).split("/").map(encodeURIComponent).join("/");
 }
 
-function getCloudPublicUrl(path) {
-  const { url, bucket } = getCloudConfig();
-  return `${url}/storage/v1/object/public/${encodeURIComponent(bucket)}/${encodeStoragePath(path)}`;
+function normalizeR2Path(path) {
+  const cleanPath = String(path || "").trim().replace(/^\/+/, "");
+  if (!cleanPath || !cleanPath.startsWith("images/") || cleanPath.includes("..")) return "";
+  return cleanPath;
+}
+
+function getR2PathFromUrl(url) {
+  const { r2PublicBaseUrl } = getCloudConfig();
+  if (!r2PublicBaseUrl || !url) return "";
+  try {
+    const parsed = new URL(url);
+    const base = new URL(r2PublicBaseUrl);
+    if (parsed.origin !== base.origin) return "";
+    return normalizeR2Path(decodeURIComponent(parsed.pathname.replace(/^\/+/, "")));
+  } catch {
+    return "";
+  }
+}
+
+function getMemoryR2Paths(memory) {
+  if (!memory) return [];
+  const paths = [
+    normalizeR2Path(memory.imagePath),
+    normalizeR2Path(memory.videoPath),
+    getR2PathFromUrl(memory.image),
+    getR2PathFromUrl(memory.videoUrl),
+  ].filter(Boolean);
+  return Array.from(new Set(paths));
+}
+
+async function r2MediaFetch(options = {}) {
+  const { r2MediaEndpoint } = getCloudConfig();
+  if (!r2MediaEndpoint) throw new Error("R2 上传接口尚未配置。");
+  if (!isAdminSessionValid()) throw new Error("管理员登录已过期，请重新登录。");
+  const response = await fetch(r2MediaEndpoint, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${getAdminAccessToken()}`,
+      ...(options.headers || {}),
+    },
+  });
+  if (!response.ok) {
+    const message = await response.text().catch(() => "");
+    let detail = message;
+    try {
+      const parsed = JSON.parse(message);
+      detail = parsed.message || parsed.error_description || parsed.error || message;
+    } catch {
+      detail = message;
+    }
+    throw new Error(`R2 ${response.status} ${response.statusText}: ${detail || "request failed"}`);
+  }
+  return response.json().catch(() => null);
+}
+
+async function deleteR2MediaPaths(paths) {
+  const cleanPaths = Array.from(new Set((paths || []).map(normalizeR2Path).filter(Boolean)));
+  if (!cleanPaths.length) return null;
+  return r2MediaFetch({
+    method: "DELETE",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ paths: cleanPaths }),
+  });
 }
 
 async function uploadMediaToCloud(file, memoryId) {
   if (!isCloudEnabled() || !file?.size) return null;
-  const { bucket } = getCloudConfig();
-  const path = `${memoryId}/${Date.now()}-${safeFileName(file.name)}`;
-  await cloudFetch(`/storage/v1/object/${encodeURIComponent(bucket)}/${encodeStoragePath(path)}`, {
+  const formData = new FormData();
+  formData.set("memoryId", memoryId);
+  formData.set("fileName", safeFileName(file.name));
+  formData.set("file", file, safeFileName(file.name));
+  return r2MediaFetch({
     method: "POST",
-    headers: cloudHeaders({
-      "content-type": getUploadContentType(file),
-      "x-upsert": "true",
-    }),
-    body: file,
+    body: formData,
   });
-  return {
-    url: getCloudPublicUrl(path),
-    path,
-  };
 }
 
 function getFileMediaType(file) {
@@ -1150,6 +1208,64 @@ function setImageCrossOrigin(image, url) {
   image.crossOrigin = "anonymous";
 }
 
+function loadHtmlImage(url) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.decoding = "async";
+    setImageCrossOrigin(image, url);
+    image.onload = () => {
+      const width = image.naturalWidth || image.width;
+      const height = image.naturalHeight || image.height;
+      if (!width || !height) {
+        reject(new Error("图片尺寸无效。"));
+        return;
+      }
+      resolve({ image, width, height, close: () => {} });
+    };
+    image.onerror = () => reject(new Error("图片加载失败。"));
+    image.src = url;
+  });
+}
+
+async function loadBitmapImage(url) {
+  if (!window.createImageBitmap || !window.fetch || /^(data:|blob:)/i.test(String(url || ""))) {
+    return loadHtmlImage(url);
+  }
+  const response = await fetch(url, {
+    mode: "cors",
+    cache: "force-cache",
+  });
+  if (!response.ok) throw new Error(`图片请求失败：${response.status}`);
+  const blob = await response.blob();
+  let bitmap = null;
+  try {
+    bitmap = await createImageBitmap(blob, { imageOrientation: "from-image" });
+  } catch (error) {
+    console.warn("createImageBitmap 解码失败，退回 HTMLImageElement", error);
+    return loadHtmlImage(url);
+  }
+  if (!bitmap.width || !bitmap.height) throw new Error("图片尺寸无效。");
+  return {
+    image: bitmap,
+    width: bitmap.width,
+    height: bitmap.height,
+    close: () => bitmap.close?.(),
+  };
+}
+
+async function loadSphereImageSource(urls) {
+  let lastError = null;
+  for (const url of urls) {
+    try {
+      return await loadBitmapImage(url);
+    } catch (error) {
+      lastError = error;
+      console.warn("照片球缩略图加载失败，尝试下一个地址", url, error);
+    }
+  }
+  throw lastError || new Error("照片球缩略图加载失败。");
+}
+
 function setCardTextureCanvasSize(canvas, aspect, count = 0) {
   const safeAspect = clampMediaAspect(aspect);
   const longSide = getSphereTextureLongSide(count);
@@ -1187,9 +1303,6 @@ function makeCardTexture(memory, index, onAspectChange, targetCount = 0, onLoadC
   texture.anisotropy = 4;
 
   drawCardTexture(context, memory, index);
-  const image = new Image();
-  image.decoding = "async";
-  image.fetchPriority = index < 24 ? "high" : "low";
   const imageUrls = getSphereImageUrls(memory);
   queueSphereImageLoad((done) => {
     let isComplete = false;
@@ -1203,68 +1316,50 @@ function makeCardTexture(memory, index, onAspectChange, targetCount = 0, onLoadC
       finishLoad();
       return;
     }
-    let imageUrlIndex = 0;
     let loadTimer = 0;
     const clearLoadTimer = () => {
       window.clearTimeout(loadTimer);
       loadTimer = 0;
     };
-    const loadNextImageUrl = () => {
-      const nextUrl = imageUrls[imageUrlIndex];
-      if (!nextUrl) {
-        finishLoad();
-        return;
-      }
-      clearLoadTimer();
-      setImageCrossOrigin(image, nextUrl);
-      if (imageUrls.length > 1) {
-        loadTimer = window.setTimeout(() => {
-          imageUrlIndex += 1;
-          loadNextImageUrl();
-        }, SPHERE_IMAGE_LOAD_TIMEOUT_MS);
-      }
-      image.src = nextUrl;
-    };
-    image.onload = () => {
+    if (imageUrls.length > 1) {
+      loadTimer = window.setTimeout(() => {
+        console.warn("照片球缩略图加载较慢，继续等待 R2 图片", memory?.id || memory?.title);
+      }, SPHERE_IMAGE_LOAD_TIMEOUT_MS);
+    }
+    loadSphereImageSource(imageUrls).then((source) => {
       if (isComplete) return;
       clearLoadTimer();
       if (!texture.userData.isDisposed) {
-        const nextAspect = clampMediaAspect(image.naturalWidth / image.naturalHeight);
+        const nextAspect = clampMediaAspect(source.width / source.height);
         if (Math.abs(nextAspect - getMemoryMediaAspect(memory)) > 0.01) {
           memory.mediaAspect = nextAspect;
           setCardTextureCanvasSize(canvas, getSphereMediaAspect(memory), targetCount);
           onAspectChange?.(nextAspect);
           saveMemories();
         }
-        drawCardTexture(context, memory, index, image);
+        drawCardTexture(context, memory, index, source);
         texture.needsUpdate = true;
       }
+      source.close?.();
       finishLoad();
-    };
-    image.onerror = () => {
-      if (isComplete) return;
-      clearLoadTimer();
-      imageUrlIndex += 1;
-      if (imageUrlIndex < imageUrls.length) {
-        loadNextImageUrl();
-        return;
-      }
+    }).catch((error) => {
+      console.warn("照片球缩略图最终加载失败", memory?.id || memory?.title, error);
       finishLoad();
-    };
-    loadNextImageUrl();
+    });
   });
   return texture;
 }
 
-function drawCardTexture(context, memory, index, image = null) {
+function drawCardTexture(context, memory, index, source = null) {
   const width = context.canvas.width;
   const height = context.canvas.height;
   context.clearRect(0, 0, width, height);
   context.fillStyle = "#050505";
   context.fillRect(0, 0, width, height);
-  if (image) {
-    const imageWidth = image.naturalWidth || image.width;
-    const imageHeight = image.naturalHeight || image.height;
+  if (source?.image) {
+    const image = source.image;
+    const imageWidth = source.width || image.naturalWidth || image.width;
+    const imageHeight = source.height || image.naturalHeight || image.height;
     if (!imageWidth || !imageHeight) return;
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = "high";
@@ -2046,15 +2141,23 @@ function restoreMemory(memoryId) {
   showTrash();
 }
 
-function purgeMemory(memoryId) {
+async function purgeMemory(memoryId) {
   if (!isAdminSessionValid()) {
     requireAdmin(() => purgeMemory(memoryId));
     return;
   }
   const memory = memories.find((item) => item.id === memoryId);
+  if (!memory) return;
+  try {
+    await deleteR2MediaPaths(getMemoryR2Paths(memory));
+  } catch (error) {
+    console.warn("无法删除 R2 媒体", error);
+    window.alert(`R2 照片删除失败，已取消彻底删除：${getErrorText(error)}`);
+    return;
+  }
   memories = memories.filter((item) => item.id !== memoryId);
   saveMemories();
-  removeMemoryFromCloud(memory);
+  await removeMemoryFromCloud(memory);
   refreshSphereAfterMemoryChange();
   showTrash();
 }
@@ -2461,7 +2564,7 @@ function updateMemoryMediaDom(memory) {
   });
 }
 
-async function uploadMemoryMediaInBackground(memoryId, file, year, month) {
+async function uploadMemoryMediaInBackground(memoryId, file, year, month, previousMediaPaths = []) {
   const memory = memories.find((item) => item.id === memoryId);
   if (!memory || !file?.size) return;
 
@@ -2501,6 +2604,7 @@ async function uploadMemoryMediaInBackground(memoryId, file, year, month) {
     pendingUploadFiles.delete(memoryId);
     revokeLocalMediaUrl(memory);
     saveMemories();
+    await deleteR2MediaPaths(previousMediaPaths).catch((error) => console.warn("无法删除被替换的 R2 媒体", error));
   } catch (error) {
     console.warn("后台上传失败", error);
     memory.isUploading = false;
@@ -2595,6 +2699,7 @@ async function handleAddSubmit(event) {
   }
 
   const memoryId = editing?.id || `user-${Date.now()}`;
+  const previousMediaPaths = editing && file && file.size ? getMemoryR2Paths(editing) : [];
   let image = editing?.image || makeSampleImage(title, memories.length + 1);
   let imagePath = editing?.imagePath || "";
   let mediaType = editing?.mediaType || "image";
@@ -2676,7 +2781,7 @@ async function handleAddSubmit(event) {
     refreshSphereAfterMemoryChange();
     showMonth(year, month);
     restoreMemoryScrollAnchor(scrollAnchor);
-    if (shouldUploadInBackground) uploadMemoryMediaInBackground(memoryId, file, year, month);
+    if (shouldUploadInBackground) uploadMemoryMediaInBackground(memoryId, file, year, month, previousMediaPaths);
   } catch (error) {
     console.warn("保存照片失败", error);
     window.alert("保存失败，请稍后再试。");
