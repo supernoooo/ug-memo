@@ -1,6 +1,7 @@
 const DB_BINDING = "MEMORIES_DB";
 let schemaReady = false;
 const ADMIN_SESSION_MS = 30 * 60 * 1000;
+const D1_BATCH_SIZE = 50;
 const ALLOWED_ORIGINS = new Set([
   "https://ug-memo.pages.dev",
   "https://supernoooo.github.io",
@@ -291,7 +292,10 @@ async function upsertMemories(request, env) {
         row.updated_at,
       ),
   );
-  await getDb(env).batch(statements);
+  const db = getDb(env);
+  for (let index = 0; index < statements.length; index += D1_BATCH_SIZE) {
+    await db.batch(statements.slice(index, index + D1_BATCH_SIZE));
+  }
   return jsonResponse(request, { ok: true, count: cleanedRows.length });
 }
 
