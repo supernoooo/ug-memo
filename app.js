@@ -19,7 +19,7 @@ const monthOrder = [9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8];
 const PROJECT_BGM_PLAYLIST = "./music/playlist.json";
 const PROJECT_BGM_FILES = [];
 const BGM_VOLUME = 0.18;
-const ADMIN_SESSION_KEY = "college-memory-admin-session";
+const ADMIN_SESSION_KEY = "college-memory-admin-session-v2";
 const ADMIN_SESSION_MS = 30 * 60 * 1000;
 const ADD_DRAFT_KEY = "college-memory-add-draft-v1";
 const SCREEN_STATE_KEY = "college-memory-screen-state-v1";
@@ -288,8 +288,8 @@ function saveMemories() {
 }
 
 function getCloudCacheKey() {
-  const { url, table } = getCloudConfig();
-  return `${CLOUD_CACHE_KEY_PREFIX}:${url}:${table}`;
+  const { memoriesEndpoint } = getCloudConfig();
+  return `${CLOUD_CACHE_KEY_PREFIX}:${memoriesEndpoint}`;
 }
 
 function isTemporaryMediaUrl(value) {
@@ -298,10 +298,7 @@ function isTemporaryMediaUrl(value) {
 
 function getCloudConfig() {
   return {
-    url: String(CLOUD_CONFIG.url || "").replace(/\/$/, ""),
-    key: String(CLOUD_CONFIG.publishableKey || CLOUD_CONFIG.anonKey || ""),
-    table: String(CLOUD_CONFIG.table || "memories"),
-    bucket: String(CLOUD_CONFIG.bucket || "memories"),
+    memoriesEndpoint: String(CLOUD_CONFIG.memoriesEndpoint || "/api/memories"),
     r2MediaEndpoint: String(CLOUD_CONFIG.r2MediaEndpoint || "/api/r2-media"),
     r2PublicBaseUrl: String(CLOUD_CONFIG.r2PublicBaseUrl || "").replace(/\/$/, ""),
   };
@@ -309,14 +306,12 @@ function getCloudConfig() {
 
 function isCloudEnabled() {
   const config = getCloudConfig();
-  return Boolean(config.url && config.key && config.table && config.bucket);
+  return Boolean(config.memoriesEndpoint);
 }
 
 function cloudHeadersWithToken(accessToken, extra = {}) {
-  const { key } = getCloudConfig();
   return {
-    apikey: key,
-    Authorization: `Bearer ${accessToken || key}`,
+    ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     ...extra,
   };
 }
@@ -326,8 +321,7 @@ function cloudHeaders(extra = {}) {
 }
 
 async function cloudFetch(path, options = {}) {
-  const { url } = getCloudConfig();
-  const response = await fetch(`${url}${path}`, options);
+  const response = await fetch(path, options);
   if (!response.ok) {
     const message = await response.text().catch(() => "");
     let detail = message;
@@ -337,7 +331,7 @@ async function cloudFetch(path, options = {}) {
     } catch {
       detail = message;
     }
-    throw new Error(`Supabase ${response.status} ${response.statusText} (${path}): ${detail || "request failed"}`);
+    throw new Error(`Cloud API ${response.status} ${response.statusText} (${path}): ${detail || "request failed"}`);
   }
   if (response.status === 204) return null;
   return response.json().catch(() => null);
@@ -585,9 +579,9 @@ function renderMediaPreview(memory, className = "") {
 
 async function fetchCloudMemories() {
   if (!isCloudEnabled()) return null;
-  const { table } = getCloudConfig();
-  const rows = await cloudFetch(`/rest/v1/${encodeURIComponent(table)}?select=*&order=created_at.desc`, {
-    headers: cloudHeaders(),
+  const { memoriesEndpoint } = getCloudConfig();
+  const rows = await cloudFetch(memoriesEndpoint, {
+    cache: "no-store",
   });
   return Array.isArray(rows) ? rows.map(cloudRowToMemory) : [];
 }
@@ -600,12 +594,11 @@ async function persistMemory(memory) {
 
 async function syncMemoryToCloud(memory) {
   if (!isCloudEnabled() || memory.source === "sample") return;
-  const { table } = getCloudConfig();
-  await cloudFetch(`/rest/v1/${encodeURIComponent(table)}?on_conflict=id`, {
+  const { memoriesEndpoint } = getCloudConfig();
+  await cloudFetch(memoriesEndpoint, {
     method: "POST",
     headers: cloudHeaders({
       "content-type": "application/json",
-      Prefer: "resolution=merge-duplicates,return=minimal",
     }),
     body: JSON.stringify(memoryToCloudRow(memory)),
   });
@@ -613,8 +606,8 @@ async function syncMemoryToCloud(memory) {
 
 async function removeMemoryFromCloud(memory) {
   if (!isCloudEnabled() || !memory || memory.source === "sample") return;
-  const { table } = getCloudConfig();
-  await cloudFetch(`/rest/v1/${encodeURIComponent(table)}?id=eq.${encodeURIComponent(memory.id)}`, {
+  const { memoriesEndpoint } = getCloudConfig();
+  await cloudFetch(`${memoriesEndpoint}?id=${encodeURIComponent(memory.id)}`, {
     method: "DELETE",
     headers: cloudHeaders(),
   }).catch((error) => console.warn("无法从云端删除照片记录", error));
@@ -660,41 +653,33 @@ function getAdminAccessToken() {
 }
 
 async function signInAdmin(email, password) {
-  if (!isCloudEnabled()) throw new Error("Supabase 尚未配置。");
-  const { url } = getCloudConfig();
-  const response = await fetch(`${url}/auth/v1/token?grant_type=password`, {
+  if (!isCloudEnabled()) throw new Error("Cloudflare D1 尚未配置。");
+  const { memoriesEndpoint } = getCloudConfig();
+  const auth = await cloudFetch(`${memoriesEndpoint}?login=1`, {
     method: "POST",
-    headers: cloudHeadersWithToken("", {
+    headers: {
       "content-type": "application/json",
-    }),
-    body: JSON.stringify({ email, password }),
+    },
+    body: JSON.stringify({ username: email, email, password }),
   });
-  if (!response.ok) {
-    throw new Error(await response.text().catch(() => "Supabase Auth 登录失败。"));
-  }
-  const auth = await response.json();
-  const isAdmin = await verifyAdminAccess(auth.access_token);
-  if (!isAdmin) throw new Error("当前账号没有管理员权限。");
+  if (!auth?.accessToken) throw new Error("当前账号没有管理员权限。");
   return {
-    email: auth.user?.email || email,
-    accessToken: auth.access_token,
-    refreshToken: auth.refresh_token || "",
-    expiresIn: Number(auth.expires_in || ADMIN_SESSION_MS / 1000),
+    email: auth.email || email,
+    accessToken: auth.accessToken,
+    refreshToken: "",
+    expiresIn: Number(auth.expiresIn || ADMIN_SESSION_MS / 1000),
   };
 }
 
 async function verifyAdminAccess(accessToken) {
-  const result = await cloudFetch("/rest/v1/rpc/is_memory_admin", {
-    method: "POST",
-    headers: cloudHeadersWithToken(accessToken, {
-      "content-type": "application/json",
-    }),
-    body: "{}",
+  const { memoriesEndpoint } = getCloudConfig();
+  const result = await cloudFetch(`${memoriesEndpoint}?verify=1`, {
+    headers: cloudHeadersWithToken(accessToken),
   }).catch((error) => {
     console.warn("无法验证管理员权限", error);
     return false;
   });
-  return result === true;
+  return result?.ok === true;
 }
 
 function saveAdminSession(auth) {
