@@ -1,8 +1,7 @@
 const R2_PUBLIC_BASE_URL = "https://pub-1aca6d58e52442cd974202e263faa11d.r2.dev";
-const SUPABASE_URL = "https://bnvzwyzrbqlvpjkmjauu.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_21K_IblyWz8zzWBgvkeAng_ix1XFhoS";
 const BUCKET_BINDING = "MEMORY_MEDIA_BUCKET";
 const R2_PREFIX = "images";
+const ADMIN_SESSION_MS = 30 * 60 * 1000;
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const ALLOWED_ORIGINS = new Set([
   "https://ug-memo.pages.dev",
@@ -76,24 +75,67 @@ function keyFromPublicUrl(value) {
   }
 }
 
-async function verifyAdmin(request) {
+function base64UrlFromBytes(bytes) {
+  let binary = "";
+  new Uint8Array(bytes).forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function stringFromBase64Url(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function getAdminSecret(env) {
+  return env.ADMIN_SESSION_SECRET || env.ADMIN_PASSWORD || env.ADMIN_TOKEN || "";
+}
+
+async function signPayload(secret, payload) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+  return base64UrlFromBytes(signature);
+}
+
+async function verifyAdminToken(token, env) {
+  const cleanToken = String(token || "").trim();
+  if (!cleanToken) return false;
+  if (env.ADMIN_TOKEN && cleanToken === env.ADMIN_TOKEN) return true;
+  const secret = getAdminSecret(env);
+  const [payload, signature] = cleanToken.split(".");
+  if (!secret || !payload || !signature) return false;
+  const expected = await signPayload(secret, payload);
+  if (signature !== expected) return false;
+  try {
+    const parsed = JSON.parse(stringFromBase64Url(payload));
+    return Number(parsed.exp || 0) > Date.now() && Number(parsed.exp || 0) <= Date.now() + ADMIN_SESSION_MS;
+  } catch {
+    return false;
+  }
+}
+
+async function verifyAdmin(request, env) {
   const authorization = request.headers.get("Authorization") || "";
   if (!authorization.startsWith("Bearer ")) return false;
-  const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/is_memory_admin`, {
-    method: "POST",
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: authorization,
-      "Content-Type": "application/json",
-    },
-    body: "{}",
-  });
-  if (!response.ok) return false;
-  return (await response.json().catch(() => false)) === true;
+  const token = authorization.slice("Bearer ".length).trim();
+  return verifyAdminToken(token, env);
 }
 
 async function handleUpload(request, env) {
-  if (!(await verifyAdmin(request))) {
+  if (!(await verifyAdmin(request, env))) {
     return jsonResponse(request, { error: "admin_required" }, 401);
   }
 
@@ -134,7 +176,7 @@ async function handleUpload(request, env) {
 }
 
 async function handleDelete(request, env) {
-  if (!(await verifyAdmin(request))) {
+  if (!(await verifyAdmin(request, env))) {
     return jsonResponse(request, { error: "admin_required" }, 401);
   }
 
