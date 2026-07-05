@@ -610,7 +610,17 @@ async function removeMemoryFromCloud(memory) {
   await cloudFetch(`${memoriesEndpoint}?id=${encodeURIComponent(memory.id)}`, {
     method: "DELETE",
     headers: cloudHeaders(),
-  }).catch((error) => console.warn("无法从云端删除照片记录", error));
+  });
+}
+
+function hasPendingUploads() {
+  return pendingUploadFiles.size > 0 || memories.some((memory) => memory.isUploading);
+}
+
+function handleBeforeUnload(event) {
+  if (!hasPendingUploads()) return;
+  event.preventDefault();
+  event.returnValue = "";
 }
 
 async function initializeCloudMemories() {
@@ -1640,12 +1650,12 @@ function showMain() {
         </div>
       </section>
       <section class="year-grid" aria-label="年级入口">
-        ${renderYearButton("freshman", "每一天的自己和前一天都不一样", "nav-freshman")}
+        ${renderYearButton("freshman", "每一天的自己都和前一天不一样", "nav-freshman")}
         ${renderYearButton("sophomore", "熟门熟路地制造很多日常", "nav-sophomore")}
         ${renderYearButton("junior", "项目、远行和成长挤在一起好忙碌", "nav-junior")}
         ${renderYearButton("senior", "还没有离开校园就已经开始怀念", "nav-senior")}
         <button class="nav-card nav-random" type="button" data-action="random">
-          <strong>随机记忆抽取</strong>
+          <strong>随机抽取记忆</strong>
           <span>抽到哪一个我？</span>
         </button>
         <button class="nav-card nav-pure" type="button" data-action="pure">
@@ -2090,7 +2100,7 @@ function closeDeleteModal() {
   }
 }
 
-function confirmDeleteMemory() {
+async function confirmDeleteMemory() {
   if (!isAdminSessionValid()) {
     requireAdmin(confirmDeleteMemory);
     return;
@@ -2105,25 +2115,41 @@ function confirmDeleteMemory() {
     closeDeleteModal();
     return;
   }
+  const previousDeletedAt = memory.deletedAt;
   memory.deletedAt = new Date().toLocaleString("zh-CN", { hour12: false });
-  persistMemory(memory);
-  closeDeleteModal();
-  refreshSphereAfterMemoryChange();
-  if (currentScreen.type === "month") showMonth(currentScreen.year, currentScreen.month, activeFilter);
-  else showMain();
+  try {
+    await syncMemoryToCloud(memory);
+    saveMemories();
+    closeDeleteModal();
+    refreshSphereAfterMemoryChange();
+    if (currentScreen.type === "month") showMonth(currentScreen.year, currentScreen.month, activeFilter);
+    else showMain();
+  } catch (error) {
+    console.warn("无法同步删除状态", error);
+    memory.deletedAt = previousDeletedAt;
+    window.alert(`移到回收箱失败，请稍后再试：${getErrorText(error)}`);
+  }
 }
 
-function restoreMemory(memoryId) {
+async function restoreMemory(memoryId) {
   if (!isAdminSessionValid()) {
     requireAdmin(() => restoreMemory(memoryId));
     return;
   }
   const memory = memories.find((item) => item.id === memoryId);
   if (!memory) return;
+  const previousDeletedAt = memory.deletedAt;
   delete memory.deletedAt;
-  persistMemory(memory);
-  refreshSphereAfterMemoryChange();
-  showTrash();
+  try {
+    await syncMemoryToCloud(memory);
+    saveMemories();
+    refreshSphereAfterMemoryChange();
+    showTrash();
+  } catch (error) {
+    console.warn("无法恢复照片记录", error);
+    memory.deletedAt = previousDeletedAt;
+    window.alert(`恢复失败，请稍后再试：${getErrorText(error)}`);
+  }
 }
 
 async function purgeMemory(memoryId) {
@@ -2134,15 +2160,18 @@ async function purgeMemory(memoryId) {
   const memory = memories.find((item) => item.id === memoryId);
   if (!memory) return;
   try {
-    await deleteR2MediaPaths(getMemoryR2Paths(memory));
+    await removeMemoryFromCloud(memory);
   } catch (error) {
-    console.warn("无法删除 R2 媒体", error);
-    window.alert(`R2 照片删除失败，已取消彻底删除：${getErrorText(error)}`);
+    console.warn("无法从云端删除照片记录", error);
+    window.alert(`彻底删除失败，请稍后再试：${getErrorText(error)}`);
     return;
   }
+  await deleteR2MediaPaths(getMemoryR2Paths(memory)).catch((error) => {
+    console.warn("照片记录已删除，但无法清理 R2 媒体", error);
+    window.alert(`记录已删除，但 R2 媒体清理失败：${getErrorText(error)}`);
+  });
   memories = memories.filter((item) => item.id !== memoryId);
   saveMemories();
-  await removeMemoryFromCloud(memory);
   refreshSphereAfterMemoryChange();
   showTrash();
 }
@@ -2912,6 +2941,7 @@ bgmPlayer.addEventListener("ended", handleBgmEnded);
 document.addEventListener("pointermove", createCometTrail);
 window.addEventListener("pointerdown", createPointerBurst, { capture: true, passive: true });
 document.addEventListener("pointerdown", unlockBgmAfterGesture);
+window.addEventListener("beforeunload", handleBeforeUnload);
 window.addEventListener("resize", updateMusicMarquee);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
