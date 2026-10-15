@@ -1,6 +1,7 @@
 const DB_BINDING = "MEMORIES_DB";
 let schemaReady = false;
 const ADMIN_SESSION_MS = 30 * 60 * 1000;
+const INVITE_SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const D1_BATCH_SIZE = 50;
 const ALLOWED_ORIGINS = new Set([
   "https://ug-memo.pages.dev",
@@ -14,7 +15,7 @@ function corsHeaders(request) {
   return {
     "Access-Control-Allow-Origin": ALLOWED_ORIGINS.has(origin) ? origin : "https://ug-memo.pages.dev",
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Invite-Token",
     "Access-Control-Max-Age": "86400",
   };
 }
@@ -124,6 +125,53 @@ async function loginAdmin(request, env) {
     email: username || expectedUsername || "admin",
     accessToken,
     expiresIn: ADMIN_SESSION_MS / 1000,
+  });
+}
+
+function getInviteSecret(env) {
+  const secret = env.INVITE_SESSION_SECRET || env.INVITE_CODE || "";
+  // 加前缀让邀请凭证和管理员凭证的签名密钥永远不同，邀请凭证不能被当成管理员凭证使用
+  return secret ? `invite:${secret}` : "";
+}
+
+async function createInviteToken(env) {
+  const payload = base64UrlFromString(JSON.stringify({
+    scope: "invite",
+    exp: Date.now() + INVITE_SESSION_MS,
+  }));
+  const signature = await signPayload(getInviteSecret(env), payload);
+  return `${payload}.${signature}`;
+}
+
+async function verifyInvite(request, env) {
+  const token = String(request.headers.get("X-Invite-Token") || "").trim();
+  const secret = getInviteSecret(env);
+  const [payload, signature] = token.split(".");
+  if (!secret || !payload || !signature) return false;
+  const expected = await signPayload(secret, payload);
+  if (signature !== expected) return false;
+  try {
+    const parsed = JSON.parse(stringFromBase64Url(payload));
+    return parsed.scope === "invite" && Number(parsed.exp || 0) > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+async function loginInvite(request, env) {
+  const payload = await request.json().catch(() => ({}));
+  const code = String(payload.code || "").trim();
+  const expectedCode = String(env.INVITE_CODE || "").trim();
+  if (!expectedCode) {
+    return jsonResponse(request, { error: "invite_code_missing" }, 500);
+  }
+  if (code !== expectedCode) {
+    return jsonResponse(request, { error: "invite_invalid" }, 401);
+  }
+  return jsonResponse(request, {
+    ok: true,
+    inviteToken: await createInviteToken(env),
+    expiresIn: INVITE_SESSION_MS / 1000,
   });
 }
 
@@ -321,7 +369,11 @@ export async function onRequest(context) {
     if (request.method === "GET" && url.searchParams.get("verify") === "1") {
       return (await verifyAdmin(request, env)) ? jsonResponse(request, { ok: true }) : jsonResponse(request, { error: "admin_required" }, 401);
     }
-    if (request.method === "GET") return listMemories(request, env);
+    if (request.method === "GET") {
+      if (!(await verifyInvite(request, env))) return jsonResponse(request, { error: "invite_required" }, 401);
+      return listMemories(request, env);
+    }
+    if (request.method === "POST" && url.searchParams.get("invite") === "1") return loginInvite(request, env);
     if (request.method === "POST" && url.searchParams.get("login") === "1") return loginAdmin(request, env);
     if (request.method === "POST") return upsertMemories(request, env);
     if (request.method === "DELETE") return deleteMemory(request, env);

@@ -13,8 +13,35 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="styles.css" />
+    <script>
+      // 已经输过邀请码且未过期时直接进入，避免邀请码窗口先闪一下
+      try {
+        const invite = JSON.parse(localStorage.getItem("college-memory-invite-session-v1") || "null");
+        if (invite && invite.token && invite.expiresAt > Date.now()) document.documentElement.classList.add("is-invited");
+      } catch {}
+    </script>
   </head>
   <body>
+    <div class="invite-gate" id="inviteGate">
+      <form class="invite-panel" id="inviteForm" role="dialog" aria-modal="true" aria-labelledby="inviteTitle">
+        <h2 id="inviteTitle">please enter your invitation code</h2>
+        <div class="invite-row" id="inviteRow">
+          <input
+            id="inviteCodeInput"
+            name="inviteCode"
+            type="text"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+            aria-label="invitation code"
+            required
+          />
+          <button class="invite-submit" id="inviteSubmitButton" type="submit" aria-label="enter">&rarr;</button>
+        </div>
+        <p class="invite-error" id="inviteError" role="alert"></p>
+      </form>
+    </div>
+
     <div class="app-shell">
       <section class="home-view view is-active is-sphere-loading" id="homeView" aria-label="首页记忆球">
         <div class="home-heading" id="homeTitle">

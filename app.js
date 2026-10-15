@@ -21,6 +21,7 @@ const PROJECT_BGM_FILES = [];
 const BGM_VOLUME = 0.18;
 const ADMIN_SESSION_KEY = "college-memory-admin-session-v2";
 const ADMIN_SESSION_MS = 30 * 60 * 1000;
+const INVITE_SESSION_KEY = "college-memory-invite-session-v1";
 const ADD_DRAFT_KEY = "college-memory-add-draft-v1";
 const SCREEN_STATE_KEY = "college-memory-screen-state-v1";
 const CLOUD_CONFIG = window.MEMORY_CLOUD_CONFIG || {};
@@ -113,8 +114,14 @@ const adminError = document.querySelector("#adminError");
 const adminWelcome = document.querySelector("#adminWelcome");
 const adminWelcomeTitle = document.querySelector("#adminWelcomeTitle");
 const adminWelcomeCopy = document.querySelector("#adminWelcomeCopy");
+const inviteForm = document.querySelector("#inviteForm");
+const inviteRow = document.querySelector("#inviteRow");
+const inviteCodeInput = document.querySelector("#inviteCodeInput");
+const inviteSubmitButton = document.querySelector("#inviteSubmitButton");
+const inviteError = document.querySelector("#inviteError");
 
 let memories = loadMemories();
+let inviteToken = readInviteToken();
 let currentScreen = { type: "home" };
 let activeFilter = "全部";
 let lastDetailSource = null;
@@ -331,7 +338,9 @@ async function cloudFetch(path, options = {}) {
     } catch {
       detail = message;
     }
-    throw new Error(`Cloud API ${response.status} ${response.statusText} (${path}): ${detail || "request failed"}`);
+    const error = new Error(`Cloud API ${response.status} ${response.statusText} (${path}): ${detail || "request failed"}`);
+    error.status = response.status;
+    throw error;
   }
   if (response.status === 204) return null;
   return response.json().catch(() => null);
@@ -582,6 +591,7 @@ async function fetchCloudMemories() {
   const { memoriesEndpoint } = getCloudConfig();
   const rows = await cloudFetch(memoriesEndpoint, {
     cache: "no-store",
+    headers: { "X-Invite-Token": inviteToken },
   });
   return Array.isArray(rows) ? rows.map(cloudRowToMemory) : [];
 }
@@ -634,7 +644,76 @@ async function initializeCloudMemories() {
       refreshCurrentScreen();
     }
   } catch (error) {
+    if (error.status === 401) {
+      // 邀请码已更换或凭证失效，回到邀请码界面
+      clearInviteSession();
+      window.location.reload();
+      return;
+    }
     console.warn("无法读取云端照片，继续使用本地数据", error);
+  }
+}
+
+function readInviteToken() {
+  try {
+    const session = JSON.parse(localStorage.getItem(INVITE_SESSION_KEY) || "null");
+    return session && session.token && session.expiresAt > Date.now() ? session.token : "";
+  } catch {
+    return "";
+  }
+}
+
+function saveInviteSession(token, expiresIn) {
+  inviteToken = token;
+  try {
+    localStorage.setItem(INVITE_SESSION_KEY, JSON.stringify({ token, expiresAt: Date.now() + expiresIn * 1000 }));
+  } catch (error) {
+    console.warn("无法保存邀请码凭证", error);
+  }
+}
+
+function clearInviteSession() {
+  inviteToken = "";
+  try {
+    localStorage.removeItem(INVITE_SESSION_KEY);
+  } catch {}
+}
+
+function showInviteGate() {
+  document.documentElement.classList.remove("is-invited");
+  inviteCodeInput.focus();
+}
+
+function shakeInviteRow() {
+  inviteRow.classList.remove("is-shaking");
+  void inviteRow.offsetWidth;
+  inviteRow.classList.add("is-shaking");
+}
+
+async function handleInviteSubmit(event) {
+  event.preventDefault();
+  const code = inviteCodeInput.value.trim();
+  if (!code || inviteSubmitButton.disabled) return;
+  inviteSubmitButton.disabled = true;
+  inviteError.textContent = "";
+  try {
+    const { memoriesEndpoint } = getCloudConfig();
+    const result = await cloudFetch(`${memoriesEndpoint}?invite=1`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    if (!result?.inviteToken) throw new Error("invite_token_missing");
+    saveInviteSession(result.inviteToken, Number(result.expiresIn) || 0);
+    inviteCodeInput.blur();
+    document.documentElement.classList.add("is-invited");
+    startApp();
+  } catch (error) {
+    inviteError.textContent = error.status === 401 ? "wrong invitation code" : "something went wrong, please try again";
+    shakeInviteRow();
+    inviteCodeInput.select();
+  } finally {
+    inviteSubmitButton.disabled = false;
   }
 }
 
@@ -2953,8 +3032,20 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+function startApp() {
+  restoreSavedScreen();
+  bgmPlayer.volume = BGM_VOLUME;
+  loadProjectBgm();
+  initializeCloudMemories();
+}
+
+inviteForm.addEventListener("submit", handleInviteSubmit);
+inviteRow.addEventListener("animationend", () => inviteRow.classList.remove("is-shaking"));
+
 populateMonthSelect();
-restoreSavedScreen();
-bgmPlayer.volume = BGM_VOLUME;
-loadProjectBgm();
-initializeCloudMemories();
+if (inviteToken) {
+  document.documentElement.classList.add("is-invited");
+  startApp();
+} else {
+  showInviteGate();
+}
